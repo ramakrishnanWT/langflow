@@ -1,7 +1,8 @@
 import { useUpdateNodeInternals } from "@xyflow/react";
-import { cloneDeep } from "lodash";
 import { AnimatePresence, motion } from "framer-motion";
+import { cloneDeep } from "lodash";
 import { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { processNodeAdvancedFields } from "@/CustomNodes/helpers/process-node-advanced-fields";
 import useUpdateAllNodes, {
   type UpdateNodesType,
@@ -11,22 +12,14 @@ import { usePostValidateComponentCode } from "@/controllers/API/queries/nodes/us
 import UpdateComponentModal from "@/modals/updateComponentModal";
 import useAlertStore from "@/stores/alertStore";
 import useFlowStore, {
-  registerNodeUpdate,
   completeNodeUpdate,
+  registerNodeUpdate,
 } from "@/stores/flowStore";
 import useFlowsManagerStore from "@/stores/flowsManagerStore";
 import { useTypesStore } from "@/stores/typesStore";
 import { useUtilityStore } from "@/stores/utilityStore";
 import type { NodeDataType } from "@/types/flow";
 import { cn } from "@/utils/utils";
-
-const ERROR_MESSAGE_UPDATING_COMPONENTS = "Error updating components";
-const ERROR_MESSAGE_UPDATING_COMPONENTS_LIST = [
-  "There was an error updating the components.",
-  "If the error persists, please report it on our Discord or GitHub.",
-];
-const ERROR_MESSAGE_EDGES_LOST =
-  "Some edges were lost after updating the components. Please review the flow and reconnect them.";
 
 const CONTAINER_VARIANTS = {
   hidden: { opacity: 0, y: 20 },
@@ -35,6 +28,7 @@ const CONTAINER_VARIANTS = {
 };
 
 export default function UpdateAllComponents() {
+  const { t } = useTranslation();
   const { componentsToUpdate, nodes, edges, setNodes } = useFlowStore();
   const templates = useTypesStore((state) => state.templates);
   const setErrorData = useAlertStore((state) => state.setErrorData);
@@ -103,7 +97,7 @@ export default function UpdateAllComponents() {
       edgesUpdateRef.current.updateComponent
     ) {
       useAlertStore.getState().setNoticeData({
-        title: ERROR_MESSAGE_EDGES_LOST,
+        title: t("errors.edgesLost"),
       });
 
       resetEdgesUpdateRef();
@@ -112,16 +106,17 @@ export default function UpdateAllComponents() {
 
   const getSuccessTitle = (updatedCount: number) => {
     resetEdgesUpdateRef();
-    return `Successfully updated ${updatedCount} component${
-      updatedCount > 1 ? "s" : ""
-    }`;
+    return t("updateComponents.successCount", { count: updatedCount });
   };
 
   const breakingChanges = updatableComponents.filter(
     (component) => component.breakingChange,
   );
 
-  const handleUpdateAllComponents = (confirmed?: boolean, ids?: string[]) => {
+  const handleUpdateAllComponents = async (
+    confirmed?: boolean,
+    ids?: string[],
+  ): Promise<void> => {
     if (updatableComponents.length === 0) {
       return;
     }
@@ -131,95 +126,106 @@ export default function UpdateAllComponents() {
     }
     startEdgesUpdateRef();
 
-    setLoadingUpdate(true);
-    takeSnapshot();
-
-    let updatedCount = 0;
-    const updates: UpdateNodesType[] = [];
-
     const nodesToUpdate = updatableComponents.filter(
       (component) => ids?.includes(component.id) ?? true,
     );
+    const registeredNodeIds: string[] = [];
+    let errorReported = false;
+    setLoadingUpdate(true);
 
-    // Register all pending updates so buildFlow will wait for them
-    for (const nodeUpdate of nodesToUpdate) {
-      registerNodeUpdate(nodeUpdate.id);
-    }
+    try {
+      takeSnapshot();
 
-    const updatePromises = nodesToUpdate.map((nodeUpdate) => {
-      const node = nodes.find((n) => n.id === nodeUpdate.id);
-      if (!node || node.type !== "genericNode") {
-        completeNodeUpdate(nodeUpdate.id);
-        return Promise.resolve();
+      // Register all pending updates so buildFlow will wait for them.
+      for (const nodeUpdate of nodesToUpdate) {
+        registerNodeUpdate(nodeUpdate.id);
+        registeredNodeIds.push(nodeUpdate.id);
       }
 
-      const thisNodeTemplate = templates[node.data.type]?.template;
-      if (!thisNodeTemplate?.code) {
-        completeNodeUpdate(nodeUpdate.id);
-        return Promise.resolve();
-      }
+      const updatePromises = nodesToUpdate.map(async (nodeUpdate) => {
+        const node = nodes.find((n) => n.id === nodeUpdate.id);
+        if (!node || node.type !== "genericNode") {
+          throw new Error(`Unable to find updatable node ${nodeUpdate.id}`);
+        }
 
-      const currentCode = thisNodeTemplate.code.value;
+        const thisNodeTemplate = templates[node.data.type]?.template;
+        if (!thisNodeTemplate?.code) {
+          throw new Error(`Unable to find template code for ${nodeUpdate.id}`);
+        }
 
-      return new Promise((resolve) => {
-        validateComponentCode({
+        const currentCode = thisNodeTemplate.code.value;
+        const validation = await validateComponentCode({
           code: currentCode,
           frontend_node: node.data.node!,
-        })
-          .then(({ data: resData, type }) => {
-            if (resData && type) {
-              const newNode = processNodeAdvancedFields(
-                resData,
-                edges,
-                nodeUpdate.id,
-              );
-
-              updates.push({
-                nodeId: nodeUpdate.id,
-                newNode,
-                code: currentCode,
-                name: "code",
-                type,
-              });
-
-              updatedCount++;
-            }
-            resolve(null);
-          })
-          .catch((error) => {
-            console.error(error);
-            resolve(null);
-          });
-      });
-    });
-
-    Promise.all(updatePromises)
-      .then(() => {
-        const updatedNodeIds = updates.map(({ nodeId }) => nodeId);
-
-        if (updatedNodeIds.length > 0) {
-          updateAllNodes(updates);
-          removeDismissedNodes(updatedNodeIds);
-
-          useAlertStore.getState().setSuccessData({
-            title: getSuccessTitle(updatedCount),
-          });
-        }
-      })
-      .catch((error) => {
-        setErrorData({
-          title: ERROR_MESSAGE_UPDATING_COMPONENTS,
-          list: ERROR_MESSAGE_UPDATING_COMPONENTS_LIST,
         });
-        console.error(error);
-      })
-      .finally(() => {
-        // Complete all pending updates regardless of success/failure
-        for (const nodeUpdate of nodesToUpdate) {
-          completeNodeUpdate(nodeUpdate.id);
+        if (!validation) return undefined;
+        const { data: resData, type } = validation;
+
+        if (!resData || !type) {
+          throw new Error(`Validation returned no update for ${nodeUpdate.id}`);
         }
-        setLoadingUpdate(false);
+
+        return {
+          nodeId: nodeUpdate.id,
+          newNode: processNodeAdvancedFields(resData, edges, nodeUpdate.id),
+          code: currentCode,
+          name: "code",
+          type,
+        } satisfies UpdateNodesType;
       });
+
+      const results = await Promise.allSettled(updatePromises);
+      const updates = results.flatMap((result) =>
+        result.status === "fulfilled" && result.value ? [result.value] : [],
+      );
+      const updatedNodeIds = updates.map(({ nodeId }) => nodeId);
+
+      if (updatedNodeIds.length > 0) {
+        updateAllNodes(updates);
+        removeDismissedNodes(updatedNodeIds);
+      }
+
+      const failedCount = results.filter(
+        (result) => result.status === "rejected",
+      ).length;
+      if (failedCount > 0) {
+        resetEdgesUpdateRef();
+        errorReported = true;
+        setErrorData({
+          title: t("errors.updateComponents"),
+          list: [
+            t("errors.updateComponentsList"),
+            t("errors.updateComponentsContact"),
+          ],
+        });
+        throw new Error(
+          `Failed to update ${failedCount} of ${nodesToUpdate.length} components`,
+        );
+      }
+
+      if (updatedNodeIds.length > 0) {
+        useAlertStore.getState().setSuccessData({
+          title: getSuccessTitle(updatedNodeIds.length),
+        });
+      }
+    } catch (error) {
+      resetEdgesUpdateRef();
+      if (!errorReported) {
+        setErrorData({
+          title: t("errors.updateComponents"),
+          list: [
+            t("errors.updateComponentsList"),
+            t("errors.updateComponentsContact"),
+          ],
+        });
+      }
+      throw error;
+    } finally {
+      for (const nodeId of registeredNodeIds) {
+        completeNodeUpdate(nodeId);
+      }
+      setLoadingUpdate(false);
+    }
   };
 
   const resetEdgesUpdateRef = () => {
@@ -263,17 +269,6 @@ export default function UpdateAllComponents() {
     buildInfo?.success;
 
   const showDismissedWarning = !allowCustomComponents && allDismissed;
-  const summaryMessage = showDismissedWarning
-    ? blockedComponents.length > 0
-      ? "Custom components are disabled"
-      : "Upgrade is required to execute flow"
-    : !allowCustomComponents
-      ? blockedComponents.length > 0 && updatableComponents.length > 0
-        ? `${blockedComponents.length} custom component${blockedComponents.length > 1 ? "s cannot" : " cannot"} run and ${updatableComponents.length} component${updatableComponents.length > 1 ? "s must" : " must"} be updated before this flow can run`
-        : blockedComponents.length > 0
-          ? `${blockedComponents.length} custom component${blockedComponents.length > 1 ? "s cannot" : " cannot"} run while custom components are disabled`
-          : `${updatableComponents.length} component${updatableComponents.length > 1 ? "s must" : " must"} be updated before this flow can run`
-      : `Update${updatableComponents.length > 1 ? "s are" : " is"} available for ${updatableComponents.length} component${updatableComponents.length > 1 ? "s" : ""}`;
 
   return (
     <AnimatePresence mode="wait">
@@ -286,7 +281,7 @@ export default function UpdateAllComponents() {
             variants={CONTAINER_VARIANTS}
             transition={{ duration: 0.2, ease: "easeOut" }}
             className={cn(
-              "flex items-center justify-between gap-8 rounded-lg border bg-background px-4 py-2 text-sm font-medium shadow-md",
+              "flex items-center justify-between gap-6 rounded-lg border bg-background px-4 py-3 text-sm shadow-md",
               (showDismissedWarning ||
                 !allowCustomComponents ||
                 updatableComponents.some(
@@ -295,40 +290,70 @@ export default function UpdateAllComponents() {
                 "border-accent-amber-foreground",
             )}
           >
-            <div className="flex items-center gap-3">
-              <span>{summaryMessage}</span>
+            <div className="flex flex-col gap-1">
+              <span className="font-semibold">
+                {showDismissedWarning
+                  ? blockedComponents.length > 0
+                    ? t("updateComponents.customComponentsDisabled")
+                    : t("updateComponents.upgradeRequired")
+                  : t("updateComponents.flowNeedsReview")}
+              </span>
+              {!showDismissedWarning && (
+                <div className="flex flex-col font-normal text-muted-foreground">
+                  {blockedComponents.length > 0 && (
+                    <span>
+                      {t("updateComponents.blockedCannotRun", {
+                        count: blockedComponents.length,
+                      })}
+                    </span>
+                  )}
+                  {updatableComponents.length > 0 && (
+                    <span>
+                      {t("updateComponents.updatableCount", {
+                        count: updatableComponents.length,
+                      })}
+                    </span>
+                  )}
+                </div>
+              )}
             </div>
-            <div className="flex items-center gap-4">
+            <div className="flex shrink-0 items-center gap-3">
               {!allDismissed && (
                 <Button
-                  variant="link"
-                  size="icon"
-                  className="shrink-0 text-sm"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
                   onClick={handleDismissAllComponents}
                 >
-                  Dismiss {componentsToUpdateFiltered.length > 1 ? "All" : ""}
+                  {componentsToUpdateFiltered.length > 1
+                    ? t("updateComponents.dismissAll")
+                    : t("updateComponents.dismiss")}
                 </Button>
               )}
               {updatableComponents.length > 0 && (
                 <Button
                   size="sm"
                   className="shrink-0"
-                  onClick={() => handleUpdateAllComponents()}
+                  onClick={() =>
+                    void handleUpdateAllComponents().catch(() => undefined)
+                  }
                   loading={loadingUpdate}
                   data-testid="update-all-button"
                 >
-                  {breakingChanges.length > 0 ? "Review All" : "Update All"}
+                  {breakingChanges.length > 0
+                    ? t("updateComponents.reviewAll")
+                    : t("updateComponents.updateAll")}
                 </Button>
               )}
             </div>
-            <UpdateComponentModal
-              isMultiple={true}
-              open={isOpen}
-              setOpen={setIsOpen}
-              onUpdateNode={(ids) => handleUpdateAllComponents(true, ids)}
-              components={updatableComponents}
-            />
           </motion.div>
+          <UpdateComponentModal
+            isMultiple={true}
+            open={isOpen}
+            setOpen={setIsOpen}
+            onUpdateNode={(ids) => handleUpdateAllComponents(true, ids)}
+            components={updatableComponents}
+          />
         </div>
       )}
     </AnimatePresence>

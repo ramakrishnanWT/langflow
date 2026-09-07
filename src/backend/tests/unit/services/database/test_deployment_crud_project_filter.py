@@ -56,7 +56,7 @@ async def test_list_deployments_page_filters_by_project_id(async_session: AsyncS
         project_id=project_a.id,
         deployment_provider_account_id=provider_account.id,
         resource_key=f"rk-{uuid4()}",
-        name=f"deployment-a-{uuid4()}",
+        display_name=f"deployment-a-{uuid4()}",
         deployment_type=DeploymentType.AGENT,
     )
     await create_deployment(
@@ -65,13 +65,14 @@ async def test_list_deployments_page_filters_by_project_id(async_session: AsyncS
         project_id=project_b.id,
         deployment_provider_account_id=provider_account.id,
         resource_key=f"rk-{uuid4()}",
-        name=f"deployment-b-{uuid4()}",
+        display_name=f"deployment-b-{uuid4()}",
         deployment_type=DeploymentType.AGENT,
     )
 
     rows = await list_deployments_page(
         async_session,
         user_id=user.id,
+        row_owner_id=user.id,
         deployment_provider_account_id=provider_account.id,
         offset=0,
         limit=20,
@@ -96,7 +97,7 @@ async def test_count_deployments_by_provider_filters_by_project_id(async_session
         project_id=project_a.id,
         deployment_provider_account_id=provider_account.id,
         resource_key=f"rk-{uuid4()}",
-        name=f"deployment-a-{uuid4()}",
+        display_name=f"deployment-a-{uuid4()}",
         deployment_type=DeploymentType.AGENT,
     )
     await create_deployment(
@@ -105,19 +106,21 @@ async def test_count_deployments_by_provider_filters_by_project_id(async_session
         project_id=project_b.id,
         deployment_provider_account_id=provider_account.id,
         resource_key=f"rk-{uuid4()}",
-        name=f"deployment-b-{uuid4()}",
+        display_name=f"deployment-b-{uuid4()}",
         deployment_type=DeploymentType.AGENT,
     )
 
     filtered_total = await count_deployments_by_provider(
         async_session,
         user_id=user.id,
+        row_owner_id=user.id,
         deployment_provider_account_id=provider_account.id,
         project_id=project_a.id,
     )
     unfiltered_total = await count_deployments_by_provider(
         async_session,
         user_id=user.id,
+        row_owner_id=user.id,
         deployment_provider_account_id=provider_account.id,
     )
 

@@ -1,6 +1,10 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import type { ConnectionItem } from "../types";
+import type {
+  ConnectionItem,
+  DeploymentProvider,
+  SelectedFlowVersion,
+} from "../types";
 
 // ---------------------------------------------------------------------------
 // Mocks — stepper context
@@ -8,13 +12,13 @@ import type { ConnectionItem } from "../types";
 
 let mockIsEditMode = false;
 let mockInitialFlowId: string | undefined;
-let mockSelectedInstance: { id: string } | null = { id: "inst-1" };
+let mockSelectedProvider: DeploymentProvider | null = null;
+let mockSelectedInstance: { id: string; provider_key?: string } | null = {
+  id: "inst-1",
+};
 let mockConnections: ConnectionItem[] = [];
 const mockSetConnections = jest.fn();
-let mockSelectedVersionByFlow = new Map<
-  string,
-  { versionId: string; versionTag: string }
->();
+let mockSelectedVersionByFlow = new Map<string, SelectedFlowVersion>();
 const mockHandleSelectVersion = jest.fn();
 let mockToolNameByFlow = new Map<string, string>();
 const mockSetToolNameByFlow = jest.fn();
@@ -28,6 +32,7 @@ jest.mock("../contexts/deployment-stepper-context", () => ({
   useDeploymentStepper: () => ({
     isEditMode: mockIsEditMode,
     initialFlowId: mockInitialFlowId,
+    selectedProvider: mockSelectedProvider,
     selectedInstance: mockSelectedInstance,
     connections: mockConnections,
     setConnections: mockSetConnections,
@@ -70,6 +75,10 @@ let mockFlowsData: Array<{
   folder_id: string;
   is_component: boolean;
   icon?: string;
+  data?: {
+    nodes: Array<{ data: { type: string } }>;
+    edges: unknown[];
+  };
 }> = [];
 
 jest.mock(
@@ -102,6 +111,16 @@ let mockVersionsData: {
   }>;
 } | null = null;
 let mockIsLoadingVersions = false;
+const mockCreateSnapshot = jest.fn();
+const mockGetFlowVersionEntry = jest.fn();
+
+jest.mock(
+  "@/controllers/API/queries/flow-version/use-get-flow-version-entry",
+  () => ({
+    getFlowVersionEntry: (...args: unknown[]) =>
+      mockGetFlowVersionEntry(...args),
+  }),
+);
 
 jest.mock(
   "@/controllers/API/queries/flow-version/use-get-flow-versions",
@@ -109,6 +128,16 @@ jest.mock(
     useGetFlowVersions: () => ({
       data: mockVersionsData,
       isLoading: mockIsLoadingVersions,
+    }),
+  }),
+);
+
+jest.mock(
+  "@/controllers/API/queries/flow-version/use-post-create-snapshot",
+  () => ({
+    usePostCreateSnapshot: () => ({
+      mutateAsync: mockCreateSnapshot,
+      isPending: false,
     }),
   }),
 );
@@ -191,10 +220,13 @@ jest.mock(
 
 import StepAttachFlows from "../components/step-attach-flows";
 
+const selectedFlow1Version1Key = "flow-1:ver-1";
+
 beforeEach(() => {
   jest.clearAllMocks();
   mockIsEditMode = false;
   mockInitialFlowId = undefined;
+  mockSelectedProvider = null;
   mockSelectedInstance = { id: "inst-1" };
   mockConnections = [];
   mockSelectedVersionByFlow = new Map();
@@ -223,6 +255,20 @@ beforeEach(() => {
     ],
   };
   mockIsLoadingVersions = false;
+  mockCreateSnapshot.mockResolvedValue({
+    id: "ver-new",
+    version_tag: "v3",
+  });
+  mockGetFlowVersionEntry.mockResolvedValue({
+    id: "ver-1",
+    data: {
+      nodes: [
+        { data: { type: "ChatInput" } },
+        { data: { type: "ChatOutput" } },
+      ],
+      edges: [],
+    },
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -230,14 +276,14 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("Three-panel layout rendering", () => {
-  it("renders the Attach Flows heading", () => {
+  it("renders the Flows heading", () => {
     render(<StepAttachFlows />);
-    expect(screen.getByText("Attach Flows")).toBeInTheDocument();
+    expect(screen.getByText("Flows")).toBeInTheDocument();
   });
 
-  it("renders the Available Flows panel header", () => {
+  it("renders the Available panel header", () => {
     render(<StepAttachFlows />);
-    expect(screen.getByText("Available Flows")).toBeInTheDocument();
+    expect(screen.getByText("Available")).toBeInTheDocument();
   });
 
   it("renders flow items in the list", () => {
@@ -304,12 +350,46 @@ describe("Version panel", () => {
   it("shows empty state when no versions available", () => {
     mockVersionsData = { entries: [] };
     render(<StepAttachFlows />);
-    expect(screen.getByText("No versions found")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Deploy this flow by creating a version from current Draft",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("creates version from draft and opens connection panel", async () => {
+    const user = userEvent.setup();
+    mockVersionsData = { entries: [] };
+    render(<StepAttachFlows />);
+
+    await user.click(screen.getByTestId("create-version-from-draft"));
+
+    await waitFor(() => {
+      expect(mockCreateSnapshot).toHaveBeenCalledWith({ flowId: "flow-1" });
+    });
+
+    await waitFor(() => {
+      expect(
+        screen.getByText("Select or Create New Connection"),
+      ).toBeInTheDocument();
+    });
+
+    expect(mockDetectEnvVars).toHaveBeenCalledWith({
+      flow_version_ids: ["ver-new"],
+    });
   });
 
   it("shows ATTACHED badge for already-attached versions", () => {
     mockSelectedVersionByFlow = new Map([
-      ["flow-1", { versionId: "ver-1", versionTag: "v1" }],
+      [
+        selectedFlow1Version1Key,
+        {
+          key: selectedFlow1Version1Key,
+          flowId: "flow-1",
+          versionId: "ver-1",
+          versionTag: "v1",
+        },
+      ],
     ]);
     render(<StepAttachFlows />);
     expect(screen.getAllByText("ATTACHED").length).toBeGreaterThanOrEqual(1);
@@ -342,7 +422,7 @@ describe("Connection panel toggle", () => {
     const user = userEvent.setup();
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("version-item-ver-1"));
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
 
     await waitFor(() => {
       expect(
@@ -355,7 +435,7 @@ describe("Connection panel toggle", () => {
     const user = userEvent.setup();
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("version-item-ver-1"));
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
 
     await waitFor(() => {
       expect(mockDetectEnvVars).toHaveBeenCalledWith({
@@ -364,12 +444,133 @@ describe("Connection panel toggle", () => {
     });
   });
 
+  it("carries the selected version's Watsonx eligibility warning into review state", async () => {
+    const user = userEvent.setup();
+    mockSelectedInstance = {
+      id: "inst-1",
+      provider_key: "watsonx-orchestrate",
+    };
+    mockGetFlowVersionEntry.mockResolvedValue({
+      id: "ver-1",
+      data: {
+        nodes: [{ data: { type: "ChatInput" } }],
+        edges: [],
+      },
+    });
+    render(<StepAttachFlows />);
+
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
+    await screen.findByTestId("connection-skip");
+    await user.click(screen.getByTestId("connection-skip"));
+
+    expect(mockHandleSelectVersion).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      flowName: "Sales Flow",
+      versionId: "ver-1",
+      versionTag: "v1",
+      wxoEligibilityIssue: "missingChatOutput",
+    });
+  });
+
+  it("validates versions while creating a Watsonx provider account", async () => {
+    const user = userEvent.setup();
+    mockSelectedInstance = null;
+    mockSelectedProvider = {
+      id: "watsonx",
+      type: "watsonx",
+      name: "Watsonx Orchestrate",
+      icon: "Watsonx",
+    };
+    mockFlowsData[0].data = {
+      nodes: [{ data: { type: "ChatInput" } }],
+      edges: [],
+    };
+    render(<StepAttachFlows />);
+
+    expect(
+      screen.getByText(
+        "Add at least one Chat Output node for Watsonx Orchestrate.",
+      ),
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
+
+    await waitFor(() => {
+      expect(mockGetFlowVersionEntry).toHaveBeenCalledWith({
+        flowId: "flow-1",
+        versionId: "ver-1",
+      });
+    });
+  });
+
+  it("keeps the newest attachment when version lookups resolve out of order", async () => {
+    const user = userEvent.setup();
+    mockSelectedInstance = {
+      id: "inst-1",
+      provider_key: "watsonx-orchestrate",
+    };
+    let resolveVersionOne: (value: unknown) => void = () => undefined;
+    let resolveVersionTwo: (value: unknown) => void = () => undefined;
+    const versionOne = new Promise((resolve) => {
+      resolveVersionOne = resolve;
+    });
+    const versionTwo = new Promise((resolve) => {
+      resolveVersionTwo = resolve;
+    });
+    mockGetFlowVersionEntry.mockImplementation(
+      ({ versionId }: { versionId: string }) =>
+        versionId === "ver-1" ? versionOne : versionTwo,
+    );
+    render(<StepAttachFlows />);
+
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
+    await user.click(screen.getByTestId("version-item-ver-2-select"));
+
+    await act(async () => {
+      resolveVersionTwo({
+        id: "ver-2",
+        data: {
+          nodes: [
+            { data: { type: "ChatInput" } },
+            { data: { type: "ChatOutput" } },
+          ],
+          edges: [],
+        },
+      });
+      await versionTwo;
+    });
+    await screen.findByTestId("connection-skip");
+
+    await act(async () => {
+      resolveVersionOne({
+        id: "ver-1",
+        data: {
+          nodes: [{ data: { type: "ChatInput" } }],
+          edges: [],
+        },
+      });
+      await versionOne;
+    });
+    await user.click(screen.getByTestId("connection-skip"));
+
+    expect(mockHandleSelectVersion).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      flowName: "Sales Flow",
+      versionId: "ver-2",
+      versionTag: "v2",
+      wxoEligibilityIssue: null,
+    });
+    expect(mockDetectEnvVars).not.toHaveBeenCalledWith({
+      flow_version_ids: ["ver-1"],
+    });
+  });
+
   it("defaults to create tab when no existing connections", async () => {
     const user = userEvent.setup();
     mockConnections = [];
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("version-item-ver-1"));
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
 
     await waitFor(() => {
       expect(
@@ -404,7 +605,15 @@ describe("Edit mode features", () => {
   beforeEach(() => {
     mockIsEditMode = true;
     mockSelectedVersionByFlow = new Map([
-      ["flow-1", { versionId: "ver-1", versionTag: "v1" }],
+      [
+        selectedFlow1Version1Key,
+        {
+          key: selectedFlow1Version1Key,
+          flowId: "flow-1",
+          versionId: "ver-1",
+          versionTag: "v1",
+        },
+      ],
     ]);
   });
 
@@ -415,36 +624,40 @@ describe("Edit mode features", () => {
 
   it("shows detach button for attached flows", () => {
     render(<StepAttachFlows />);
-    expect(screen.getByTestId("detach-flow-flow-1")).toBeInTheDocument();
+    expect(screen.getByTestId("detach-version-ver-1")).toBeInTheDocument();
   });
 
   it("calls handleRemoveAttachedFlow when detach is clicked", async () => {
     const user = userEvent.setup();
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("detach-flow-flow-1"));
-    expect(mockHandleRemoveAttachedFlow).toHaveBeenCalledWith("flow-1");
+    await user.click(screen.getByTestId("detach-version-ver-1"));
+    expect(mockHandleRemoveAttachedFlow).toHaveBeenCalledWith(
+      selectedFlow1Version1Key,
+    );
   });
 
   it("shows REMOVED badge for removed flows", () => {
-    mockRemovedFlowIds = new Set(["flow-1"]);
+    mockRemovedFlowIds = new Set([selectedFlow1Version1Key]);
     render(<StepAttachFlows />);
-    expect(screen.getByText("REMOVED")).toBeInTheDocument();
+    expect(screen.getAllByText("REMOVED").length).toBeGreaterThanOrEqual(1);
   });
 
   it("shows undo button for removed flows", () => {
-    mockRemovedFlowIds = new Set(["flow-1"]);
+    mockRemovedFlowIds = new Set([selectedFlow1Version1Key]);
     render(<StepAttachFlows />);
-    expect(screen.getByTestId("undo-remove-flow-flow-1")).toBeInTheDocument();
+    expect(screen.getByTestId("undo-version-ver-1")).toBeInTheDocument();
   });
 
   it("calls handleUndoRemoveFlow when undo is clicked", async () => {
     const user = userEvent.setup();
-    mockRemovedFlowIds = new Set(["flow-1"]);
+    mockRemovedFlowIds = new Set([selectedFlow1Version1Key]);
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("undo-remove-flow-flow-1"));
-    expect(mockHandleUndoRemoveFlow).toHaveBeenCalledWith("flow-1");
+    await user.click(screen.getByTestId("undo-version-ver-1"));
+    expect(mockHandleUndoRemoveFlow).toHaveBeenCalledWith(
+      selectedFlow1Version1Key,
+    );
   });
 
   it("sorts attached flows to the top", () => {
@@ -467,7 +680,7 @@ describe("Detected env vars auto-population", () => {
     });
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("version-item-ver-1"));
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
 
     await waitFor(() => {
       const keyInputs = screen.getAllByPlaceholderText("Key");
@@ -485,7 +698,7 @@ describe("Detected env vars auto-population", () => {
     mockDetectEnvVars.mockResolvedValueOnce({ variables: [] });
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("version-item-ver-1"));
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
 
     await waitFor(() => {
       const keyInputs = screen.getAllByPlaceholderText("Key");
@@ -499,7 +712,7 @@ describe("Detected env vars auto-population", () => {
     mockDetectEnvVars.mockRejectedValueOnce(new Error("network error"));
     render(<StepAttachFlows />);
 
-    await user.click(screen.getByTestId("version-item-ver-1"));
+    await user.click(screen.getByTestId("version-item-ver-1-select"));
 
     await waitFor(() => {
       expect(
@@ -513,10 +726,17 @@ describe("Detected env vars auto-population", () => {
   });
 
   it("auto-detects env vars for pre-selected flow version on mount", async () => {
-    const user = userEvent.setup();
     mockInitialFlowId = "flow-1";
     mockSelectedVersionByFlow = new Map([
-      ["flow-1", { versionId: "ver-1", versionTag: "v1" }],
+      [
+        selectedFlow1Version1Key,
+        {
+          key: selectedFlow1Version1Key,
+          flowId: "flow-1",
+          versionId: "ver-1",
+          versionTag: "v1",
+        },
+      ],
     ]);
     mockDetectEnvVars.mockResolvedValueOnce({
       variables: ["GLOBAL_SECRET"],
@@ -530,14 +750,85 @@ describe("Detected env vars auto-population", () => {
       });
     });
 
-    // The pre-selected useEffect switches to the connection panel but defaults
-    // to the "available" tab. Switch to "Create Connection" to see env var rows.
-    await user.click(screen.getByText("Create Connection"));
+    // The pre-selected useEffect now calls initConnectionsForFlow which switches
+    // to the "create" tab when no connections exist — env var rows are already visible.
 
     await waitFor(() => {
       const keyInputs = screen.getAllByPlaceholderText("Key");
       expect(keyInputs).toHaveLength(1);
       expect(keyInputs[0]).toHaveValue("GLOBAL_SECRET");
+    });
+  });
+
+  it("attaches selected connections for a pre-selected canvas flow", async () => {
+    const user = userEvent.setup();
+    mockInitialFlowId = "flow-1";
+    mockSelectedVersionByFlow = new Map([
+      [
+        selectedFlow1Version1Key,
+        {
+          key: selectedFlow1Version1Key,
+          flowId: "flow-1",
+          versionId: "ver-1",
+          versionTag: "v1",
+        },
+      ],
+    ]);
+    mockConnections = [
+      {
+        id: "conn-1",
+        connectionId: "conn-1",
+        name: "testconn3",
+        variableCount: 0,
+        isNew: false,
+        environmentVariables: {},
+      },
+    ];
+
+    render(<StepAttachFlows />);
+
+    await waitFor(() => {
+      expect(screen.getByTestId("connection-item-conn-1")).toBeInTheDocument();
+    });
+    await user.click(screen.getByTestId("connection-item-conn-1"));
+    await user.click(screen.getByTestId("connection-attach"));
+
+    const updateConnections =
+      mockSetAttachedConnectionByFlow.mock.calls.at(-1)?.[0];
+    expect(updateConnections).toBeInstanceOf(Function);
+    const nextConnections = updateConnections(new Map<string, string[]>());
+    expect(nextConnections.get(selectedFlow1Version1Key)).toEqual(["conn-1"]);
+  });
+
+  it("uses the real flow name for pre-selected canvas flow tool names", async () => {
+    mockInitialFlowId = "flow-1";
+    mockSelectedVersionByFlow = new Map([
+      [
+        selectedFlow1Version1Key,
+        {
+          key: selectedFlow1Version1Key,
+          flowId: "flow-1",
+          versionId: "ver-1",
+          versionTag: "v1",
+        },
+      ],
+    ]);
+
+    render(<StepAttachFlows />);
+
+    await waitFor(() => {
+      expect(mockSetToolNameByFlow).toHaveBeenCalled();
+    });
+
+    const updateToolNames = mockSetToolNameByFlow.mock.calls.at(-1)?.[0];
+    expect(updateToolNames).toBeInstanceOf(Function);
+    const nextToolNames = updateToolNames(new Map<string, string>());
+    expect(nextToolNames.get(selectedFlow1Version1Key)).toBe("Sales Flow");
+    expect(mockHandleSelectVersion).toHaveBeenCalledWith({
+      flowId: "flow-1",
+      flowName: "Sales Flow",
+      versionId: "ver-1",
+      versionTag: "v1",
     });
   });
 });

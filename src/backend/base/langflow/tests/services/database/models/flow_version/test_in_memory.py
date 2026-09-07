@@ -141,7 +141,7 @@ async def deployment(
         project_id=folder.id,
         deployment_provider_account_id=provider_account.id,
         resource_key="rk-1",
-        name="my-deployment",
+        display_name="my-deployment",
     )
     db.add(d)
     await db.commit()
@@ -806,6 +806,7 @@ class TestListDeploymentsPageAttachmentCount:
         page = await list_deployments_page(
             db,
             user_id=user.id,
+            row_owner_id=user.id,
             deployment_provider_account_id=provider_account.id,
             offset=0,
             limit=10,
@@ -827,6 +828,7 @@ class TestListDeploymentsPageAttachmentCount:
         page = await list_deployments_page(
             db,
             user_id=user.id,
+            row_owner_id=user.id,
             deployment_provider_account_id=provider_account.id,
             offset=0,
             limit=10,
@@ -842,6 +844,7 @@ class TestListDeploymentsPageAttachmentCount:
         page = await list_deployments_page(
             db,
             user_id=user.id,
+            row_owner_id=user.id,
             deployment_provider_account_id=provider_account.id,
             offset=0,
             limit=10,

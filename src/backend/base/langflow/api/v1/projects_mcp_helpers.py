@@ -3,14 +3,18 @@
 Extracted from projects.py to reduce file size and isolate MCP concerns (SO1).
 """
 
-from typing import cast
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import HTTPException
+from lfx.base.mcp.uvx import mcp_sdk_constraint_args
 from lfx.log.logger import logger
 from lfx.services.mcp_composer.service import MCPComposerService
 
-from langflow.api.utils.mcp.config_utils import validate_mcp_server_for_project
+from langflow.api.utils.mcp.config_utils import (
+    mcp_server_config_uses_current_uvx_constraint,
+    validate_mcp_server_for_project,
+)
 from langflow.api.v1.mcp_projects import get_project_streamable_http_url
 from langflow.api.v2.mcp import update_server
 from langflow.services.database.models.api_key.crud import create_api_key
@@ -19,49 +23,78 @@ from langflow.services.deps import get_service, get_settings_service, get_storag
 from langflow.services.schema import ServiceType
 
 
+def _server_config_uses_streamable_http(args: list[Any], streamable_http_url: str) -> bool:
+    """Return whether the server args target this project's Streamable HTTP endpoint."""
+    string_args = [arg for arg in args if isinstance(arg, str)]
+    return (
+        "mcp-proxy" in string_args
+        and "--transport" in string_args
+        and "streamablehttp" in string_args
+        and streamable_http_url in string_args
+    )
+
+
+def _server_config_has_project_api_key(args: list[Any]) -> bool:
+    """Return whether the server args include the generated Langflow API key header."""
+    return any(
+        arg == "--headers" and index + 2 < len(args) and args[index + 1] == "x-api-key"
+        for index, arg in enumerate(args)
+    )
+
+
+def _server_config_matches_project_auth(
+    existing_config: dict[str, Any] | None,
+    auth_type: str,
+    streamable_http_url: str,
+) -> bool:
+    """Check whether the stored MCP server config already matches the project's auth mode."""
+    if not existing_config:
+        return False
+
+    args = existing_config.get("args")
+    if (
+        not isinstance(args, list)
+        or not mcp_server_config_uses_current_uvx_constraint(existing_config, "mcp-proxy")
+        or not _server_config_uses_streamable_http(args, streamable_http_url)
+    ):
+        return False
+
+    has_project_api_key = _server_config_has_project_api_key(args)
+    if auth_type == "apikey":
+        return has_project_api_key
+    if auth_type == "none":
+        return not has_project_api_key
+    return False
+
+
 async def register_mcp_servers_for_project(
     project,
     default_auth: dict,
     current_user,
     session,
-) -> None:
+    *,
+    raise_on_error: bool = False,
+    owns_transaction: bool = True,
+) -> bool:
     """Register MCP servers for a newly created project.
 
     This handles the full MCP auto-registration flow: building the transport URL,
     creating API keys if needed, validating conflicts, and calling update_server.
 
-    Raises HTTPException on conflicts or unsupported auth types.
+    Pass ``owns_transaction=False`` when the caller already owns the transaction (the
+    startup reconciliation runs inside ``session.begin_nested()``). That keeps the API
+    key created below in the same unit of work as the server write, so a failure rolls
+    both back instead of leaving an unreferenced credential behind.
+
+    Returns:
+        True when the server config was created or updated, otherwise False.
+
+    Raises:
+        HTTPException: On server name conflicts.
     """
     try:
         streamable_http_url = await get_project_streamable_http_url(project.id)
-
-        if default_auth.get("auth_type", "none") == "apikey":
-            api_key_name = f"MCP Project {project.name} - default"
-            unmasked_api_key = await create_api_key(session, ApiKeyCreate(name=api_key_name), current_user.id)
-            command = "uvx"
-            args = [
-                "mcp-proxy",
-                "--transport",
-                "streamablehttp",
-                "--headers",
-                "x-api-key",
-                unmasked_api_key.api_key,
-                streamable_http_url,
-            ]
-        elif default_auth.get("auth_type", "none") == "oauth":
-            msg = "OAuth authentication is not yet implemented for MCP server creation during project creation."
-            await logger.awarning(msg)
-            return
-        else:
-            command = "uvx"
-            args = [
-                "mcp-proxy",
-                "--transport",
-                "streamablehttp",
-                streamable_http_url,
-            ]
-
-        server_config = {"command": command, "args": args}
+        auth_type = default_auth.get("auth_type", "none")
 
         validation_result = await validate_mcp_server_for_project(
             project.id,
@@ -80,11 +113,55 @@ async def register_mcp_servers_for_project(
                 detail=validation_result.conflict_message,
             )
 
+        if validation_result.should_skip and _server_config_matches_project_auth(
+            validation_result.existing_config,
+            auth_type,
+            streamable_http_url,
+        ):
+            await logger.adebug(
+                "MCP server '%s' already matches auth %s for project %s, skipping",
+                validation_result.server_name,
+                auth_type,
+                project.id,
+            )
+            return False
+
+        if auth_type == "apikey":
+            api_key_name = f"MCP Project {project.name} - default"
+            unmasked_api_key = await create_api_key(session, ApiKeyCreate(name=api_key_name), current_user.id)
+            command = "uvx"
+            args = [
+                *mcp_sdk_constraint_args(),
+                "mcp-proxy",
+                "--transport",
+                "streamablehttp",
+                "--headers",
+                "x-api-key",
+                unmasked_api_key.api_key,
+                streamable_http_url,
+            ]
+        elif auth_type == "oauth":
+            msg = "OAuth authentication is not yet implemented for MCP server creation during project creation."
+            await logger.awarning(msg)
+            return False
+        else:
+            command = "uvx"
+            args = [
+                *mcp_sdk_constraint_args(),
+                "mcp-proxy",
+                "--transport",
+                "streamablehttp",
+                streamable_http_url,
+            ]
+
+        server_config = {"command": command, "args": args}
+
         if validation_result.should_skip:
             await logger.adebug(
-                "MCP server '%s' already exists for project %s, updating",
+                "MCP server '%s' exists for project %s but does not match auth %s, updating",
                 validation_result.server_name,
                 project.id,
+                auth_type,
             )
 
         server_name = validation_result.server_name
@@ -96,11 +173,42 @@ async def register_mcp_servers_for_project(
             session,
             get_storage_service(),
             get_settings_service(),
+            owns_transaction=owns_transaction,
         )
     except HTTPException:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         await logger.aexception("Failed to auto-register MCP server for project %s: %s", project.id, e)
+        if raise_on_error:
+            raise
+        return False
+    else:
+        return True
+
+
+async def reconcile_mcp_server_for_auth_update(
+    project,
+    new_auth_type: str | None,
+    current_user,
+    session,
+) -> bool:
+    """Sync the MCP server config for a project whose auth settings just changed.
+
+    OAuth reconciliation is driven separately by MCP Composer, so this helper only
+    touches apikey/none modes. Returns True when the server config was updated.
+    """
+    if new_auth_type not in {"apikey", "none"}:
+        return False
+
+    if not get_settings_service().settings.add_projects_to_mcp_servers:
+        return False
+
+    return await register_mcp_servers_for_project(
+        project,
+        {"auth_type": new_auth_type},
+        current_user,
+        session,
+    )
 
 
 async def handle_mcp_server_rename(

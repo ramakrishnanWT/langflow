@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import type { SidebarSection } from "@/components/ui/sidebar";
 import enTranslations from "@/locales/en.json";
 import SidebarSegmentedNav, { NAV_ITEMS } from "../sidebarSegmentedNav";
@@ -117,6 +117,7 @@ jest.mock("@/utils/utils", () => ({
 }));
 
 jest.mock("@/stores/playgroundStore", () => ({
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   usePlaygroundStore: (selector: (state: typeof mockPlaygroundStore) => any) =>
     selector(mockPlaygroundStore),
 }));
@@ -161,10 +162,13 @@ describe("SidebarSegmentedNav", () => {
 
     NAV_ITEMS.forEach((item) => {
       const tooltips = screen.getAllByTestId("tooltip");
+      // Mirror the t(key) mock: return translation if it exists, otherwise fall back to the key itself
+      const expectedContent =
+        (enTranslations[item.tooltip as keyof typeof enTranslations] as
+          | string
+          | undefined) ?? item.tooltip;
       const itemTooltip = tooltips.find(
-        (tooltip) =>
-          tooltip.getAttribute("data-content") ===
-          enTranslations[item.tooltip as keyof typeof enTranslations],
+        (tooltip) => tooltip.getAttribute("data-content") === expectedContent,
       );
       expect(itemTooltip).toBeInTheDocument();
       expect(itemTooltip).toHaveAttribute("data-side", "right");
@@ -183,12 +187,12 @@ describe("SidebarSegmentedNav", () => {
     expect(componentsButton).toHaveAttribute("data-active", "false");
   });
 
-  it("sets active state for search when activeSection is search", () => {
-    mockUseSidebar.activeSection = "search";
+  it("sets active state for bundles when activeSection is bundles", () => {
+    mockUseSidebar.activeSection = "bundles";
     render(<SidebarSegmentedNav />);
 
-    const searchButton = screen.getByTestId("sidebar-nav-search");
-    expect(searchButton).toHaveAttribute("data-active", "true");
+    const bundlesButton = screen.getByTestId("sidebar-nav-bundles");
+    expect(bundlesButton).toHaveAttribute("data-active", "true");
   });
 
   it("calls setActiveSection when clicking on different section", () => {
@@ -255,40 +259,6 @@ describe("SidebarSegmentedNav", () => {
     expect(mockUseSearchContext.setSearch).toHaveBeenCalledTimes(1);
   });
 
-  it("focuses search input when search section is clicked", async () => {
-    render(<SidebarSegmentedNav />);
-
-    const searchButton = screen.getByTestId("sidebar-nav-search");
-    fireEvent.click(searchButton);
-
-    expect(mockUseSidebar.setActiveSection).toHaveBeenCalledWith("search");
-
-    // Fast-forward the setTimeout
-    jest.advanceTimersByTime(100);
-
-    await waitFor(() => {
-      expect(mockUseSearchContext.focusSearch).toHaveBeenCalledTimes(1);
-    });
-  });
-
-  it("focuses search input even when sidebar is closed", async () => {
-    mockUseSidebar.open = false;
-    render(<SidebarSegmentedNav />);
-
-    const searchButton = screen.getByTestId("sidebar-nav-search");
-    fireEvent.click(searchButton);
-
-    expect(mockUseSidebar.setActiveSection).toHaveBeenCalledWith("search");
-    expect(mockUseSidebar.toggleSidebar).toHaveBeenCalledTimes(1);
-
-    // Fast-forward the setTimeout
-    jest.advanceTimersByTime(100);
-
-    await waitFor(() => {
-      expect(mockUseSearchContext.focusSearch).toHaveBeenCalledTimes(1);
-    });
-  });
-
   it("renders accessibility labels correctly", () => {
     render(<SidebarSegmentedNav />);
 
@@ -296,9 +266,11 @@ describe("SidebarSegmentedNav", () => {
       const button = screen.getByTestId(`sidebar-nav-${item.id}`);
       // Check for screen reader only text
       const srOnlySpan = button.querySelector(".sr-only");
-      expect(srOnlySpan).toHaveTextContent(
-        enTranslations[item.label as keyof typeof enTranslations],
-      );
+      const expectedLabel =
+        (enTranslations[item.label as keyof typeof enTranslations] as
+          | string
+          | undefined) ?? item.label;
+      expect(srOnlySpan).toHaveTextContent(expectedLabel);
     });
   });
 
@@ -383,32 +355,104 @@ describe("SidebarSegmentedNav", () => {
     expect(mockUseSidebar.setActiveSection).toHaveBeenCalledWith("mcp");
   });
 
+  it("renders a separator element before the memories nav item", () => {
+    const { container } = render(<SidebarSegmentedNav />);
+    // The separator is a plain <li aria-hidden="true"> injected before memories.
+    // It must NOT carry role="separator" — that's an invalid ARIA role on <li>
+    // (IBM Equal Access aria_role_valid) and is unnecessary since the element
+    // is already fully hidden from the accessibility tree via aria-hidden.
+    const separator = container.querySelector("li[aria-hidden='true']");
+    expect(separator).toBeInTheDocument();
+    expect(separator).not.toHaveAttribute("role");
+  });
+
+  it("separator renders only once", () => {
+    const { container } = render(<SidebarSegmentedNav />);
+    const separators = container.querySelectorAll("li[aria-hidden='true']");
+    expect(separators).toHaveLength(1);
+  });
+
+  it("separator appears immediately before the first feature tab in the DOM order", () => {
+    const { container } = render(<SidebarSegmentedNav />);
+    const menuItems = container.querySelectorAll(
+      "[data-testid='sidebar-menu-item'], li[aria-hidden='true']",
+    );
+    const nodes = Array.from(menuItems);
+    const separatorIndex = nodes.findIndex(
+      (n) => n.tagName === "LI" && !n.hasAttribute("data-testid"),
+    );
+    const agentButton = container.querySelector(
+      '[data-testid="sidebar-nav-agent"]',
+    );
+    const agentItem = agentButton?.closest('[data-testid="sidebar-menu-item"]');
+    const agentIndex = nodes.indexOf(agentItem as Element);
+    // Agent is the first feature tab, so the separator sits immediately before it
+    expect(separatorIndex).toBe(agentIndex - 1);
+  });
+
+  it("sidebar-menu has no direct div children between it and menu items", () => {
+    const { container } = render(<SidebarSegmentedNav />);
+    const sidebarMenu = container.querySelector('[data-testid="sidebar-menu"]');
+    const directDivChildren = Array.from(sidebarMenu?.children ?? []).filter(
+      (child) => child.tagName === "DIV" && !child.hasAttribute("data-testid"),
+    );
+    // No anonymous wrapper divs — each direct child is either a menu-item or separator
+    expect(directDivChildren).toHaveLength(0);
+  });
+
   it("exports NAV_ITEMS correctly", () => {
-    expect(NAV_ITEMS).toHaveLength(6);
+    expect(NAV_ITEMS).toHaveLength(7);
     expect(NAV_ITEMS[0]).toEqual({
-      id: "search",
-      icon: "search",
-      label: "sidebar.nav.search",
-      tooltip: "sidebar.nav.search",
+      id: "components",
+      icon: "component",
+      label: "sidebar.nav.components",
+      tooltip: "sidebar.nav.components",
     });
-    expect(NAV_ITEMS[3]).toEqual({
+    expect(NAV_ITEMS[1]).toEqual({
+      id: "mcp",
+      icon: "Mcp",
+      label: "sidebar.nav.mcp",
+      tooltip: "sidebar.nav.mcp",
+    });
+    expect(NAV_ITEMS[2]).toEqual({
       id: "bundles",
       icon: "blocks",
       label: "sidebar.nav.bundles",
       tooltip: "sidebar.nav.bundles",
     });
-    expect(NAV_ITEMS[4]).toEqual({
+    expect(NAV_ITEMS[3]).toEqual({
       id: "versions",
       icon: "History",
       label: "sidebar.nav.versions",
       tooltip: "sidebar.nav.versionHistory",
     });
+    expect(NAV_ITEMS[4]).toEqual({
+      id: "agent",
+      icon: "Bot",
+      label: "sidebar.nav.agent",
+      tooltip: "sidebar.nav.agent",
+    });
     expect(NAV_ITEMS[5]).toEqual({
+      id: "memories",
+      icon: "BrainCog",
+      label: "memory.sidebarTitle",
+      tooltip: "memory.sidebarTitle",
+    });
+    expect(NAV_ITEMS[6]).toEqual({
       id: "traces",
       icon: "Activity",
       label: "sidebar.nav.traces",
       tooltip: "sidebar.nav.traces",
     });
+  });
+
+  it("always shows the agent tab", () => {
+    render(<SidebarSegmentedNav />);
+
+    // The tab renders for every flow; eligibility is handled inside the tab.
+    expect(screen.getByTestId("sidebar-nav-agent")).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-nav-components")).toBeInTheDocument();
+    expect(screen.getByTestId("sidebar-nav-memories")).toBeInTheDocument();
   });
 
   it("sets active section to traces when clicking traces", () => {

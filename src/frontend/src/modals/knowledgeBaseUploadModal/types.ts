@@ -12,9 +12,13 @@ export interface KnowledgeBaseUploadModalProps {
     chunkOverlap?: number;
     separator?: string;
     columnConfig?: ColumnConfigRow[];
+    backendType?: string;
+    backendConfig?: Record<string, unknown>;
   };
   hideAdvanced?: boolean;
   existingKnowledgeBaseNames?: string[];
+  /** Called when the dialog closes and focus would return to the trigger. */
+  onCloseAutoFocus?: (event: Event) => void;
 }
 
 export interface ColumnConfigRow {
@@ -32,6 +36,8 @@ export interface KnowledgeBaseFormData {
   separator?: string;
   columnConfig?: ColumnConfigRow[];
   chunkCount?: number;
+  backendType?: string;
+  backendConfig?: Record<string, unknown>;
 }
 
 export interface ChunkPreview {

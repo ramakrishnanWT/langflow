@@ -1,11 +1,11 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
 import ShadTooltip from "@/components/common/shadTooltipComponent";
 import MultiselectComponent from "@/components/core/parameterRenderComponent/components/multiselectComponent";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import type { ProviderVariable } from "@/constants/providerConstants";
-import { customOpenNewTab } from "@/customization/utils/custom-open-new-tab";
 import useAlertStore from "@/stores/alertStore";
 import DisconnectWarning from "./DisconnectWarning";
 import type { Provider } from "./types";
@@ -52,7 +52,11 @@ export interface ProviderConfigurationFormProps {
 }
 
 // Generate a stable random placeholder for a given variable type
-const getPlaceholder = (variableName: string, provider: string) => {
+const getPlaceholder = (
+  variableName: string,
+  provider: string,
+  t: (key: string, opts?: Record<string, string>) => string,
+) => {
   const name = variableName.toLowerCase();
   const providerLower = provider.toLowerCase();
 
@@ -70,7 +74,7 @@ const getPlaceholder = (variableName: string, provider: string) => {
     if (providerLower.includes("openai")) return "sk-...";
   }
 
-  return `Enter your ${variableName}`;
+  return t("modelProviders.enterVariable", { variableName });
 };
 
 const ProviderConfigurationForm = ({
@@ -94,6 +98,7 @@ const ProviderConfigurationForm = ({
   requiresConfiguration,
   isFetchingAfterDisconnect,
 }: ProviderConfigurationFormProps) => {
+  const { t } = useTranslation();
   const [showDisconnectWarning, setShowDisconnectWarning] = useState(false);
   const [editingSecret, setEditingSecret] = useState<Record<string, boolean>>(
     {},
@@ -108,7 +113,7 @@ const ProviderConfigurationForm = ({
   useEffect(() => {
     if (validationState === "invalid" && validationError) {
       setErrorData({
-        title: "Validation Failed",
+        title: t("modelProviders.validationFailed"),
         list: [validationError],
       });
     }
@@ -125,7 +130,10 @@ const ProviderConfigurationForm = ({
   return (
     <div className="flex flex-col gap-1 px-4 pt-4">
       <div className="flex flex-row gap-1 min-w-[300px]">
-        <span className="text-[13px] font-semibold mr-auto">
+        <span
+          id="provider-single-variable-label"
+          className="text-[13px] font-semibold mr-auto"
+        >
           {isSingleVariableProvider ? (
             <>
               {providerVariables[0].variable_name}
@@ -134,28 +142,40 @@ const ProviderConfigurationForm = ({
               )}
             </>
           ) : (
-            `${selectedProvider.provider || "Unknown Provider"} ${requiresConfiguration && " Configuration"}`
+            `${selectedProvider.provider || t("modelProviders.unknownProvider")} ${requiresConfiguration && ` ${t("modelProviders.configuration")}`}`
           )}
         </span>
       </div>
       <span className="text-[13px] text-muted-foreground pt-1 pb-2">
         {requiresConfiguration ? (
           <>
-            Configure your{" "}
-            <span
-              className="underline cursor-pointer hover:text-primary"
-              onClick={() => {
-                if (selectedProvider.api_docs_url) {
-                  customOpenNewTab(selectedProvider.api_docs_url);
-                }
-              }}
-            >
-              {selectedProvider.provider} credentials
-            </span>{" "}
-            to enable these models
+            {t("modelProviders.configurePrefix")}{" "}
+            {selectedProvider.api_docs_url ? (
+              <a
+                href={selectedProvider.api_docs_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-primary rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              >
+                {t("modelProviders.credentialsLink", {
+                  provider: selectedProvider.provider,
+                })}
+              </a>
+            ) : (
+              <span>
+                {t("modelProviders.credentialsLink", {
+                  provider: selectedProvider.provider,
+                })}
+              </span>
+            )}{" "}
+            {t("modelProviders.toEnableModels")}
           </>
         ) : (
-          <>Activate {selectedProvider.provider} to enable these models</>
+          <>
+            {t("modelProviders.activateToEnable", {
+              provider: selectedProvider.provider,
+            })}
+          </>
         )}
       </span>
       {requiresConfiguration ? (
@@ -164,11 +184,27 @@ const ProviderConfigurationForm = ({
             const isConfigured = isVariableConfigured(variable.variable_key);
             const hasNewValue = variableValues[variable.variable_key]?.trim();
             const isEditing = editingSecret[variable.variable_key];
+            const inputId = `provider-variable-${variable.variable_key}`;
+            // Single-variable providers render their only label as the form
+            // heading, so the control is named via aria-labelledby instead.
+            const labelId = isSingleVariableProvider
+              ? "provider-single-variable-label"
+              : `provider-variable-label-${variable.variable_key}`;
 
             return (
               <div key={variable.variable_key} className="flex flex-col gap-1">
                 {!isSingleVariableProvider && (
-                  <label className="text-[12px] font-medium text-muted-foreground">
+                  <label
+                    id={labelId}
+                    // The options branch renders a multiselect with no id —
+                    // only the text-input branch has a target for htmlFor.
+                    htmlFor={
+                      variable.options && variable.options.length > 0
+                        ? undefined
+                        : inputId
+                    }
+                    className="text-[12px] font-medium text-muted-foreground"
+                  >
                     {variable.variable_name}
                     {variable.required && (
                       <span className="text-destructive ml-1">*</span>
@@ -180,6 +216,7 @@ const ProviderConfigurationForm = ({
                   <div className="relative">
                     <MultiselectComponent
                       id={variable.variable_key}
+                      ariaLabelledBy={labelId}
                       editNode={false}
                       disabled={isSaving || isDeleting}
                       value={
@@ -243,9 +280,24 @@ const ProviderConfigurationForm = ({
                 ) : (
                   // Render input for text/secret variables
                   <Input
+                    id={inputId}
+                    aria-labelledby={
+                      isSingleVariableProvider ? labelId : undefined
+                    }
+                    aria-invalid={
+                      (validationState === "invalid" && variable.required) ||
+                      undefined
+                    }
+                    aria-describedby={
+                      validationState === "invalid" && validationError
+                        ? "provider-validation-error"
+                        : undefined
+                    }
+                    data-testid={`provider-variable-input-${variable.variable_key}`}
                     placeholder={getPlaceholder(
                       variable.variable_name,
                       selectedProvider.provider,
+                      t,
                     )}
                     value={
                       isConfigured &&
@@ -312,30 +364,41 @@ const ProviderConfigurationForm = ({
               </div>
             );
           })}
+          {validationState === "invalid" && validationError && (
+            <p
+              id="provider-validation-error"
+              role="alert"
+              className="field-invalid static"
+            >
+              {validationError}
+            </p>
+          )}
           {/* Save button */}
           <div className="flex justify-end mt-2 gap-2">
             {selectedProvider.is_enabled && (
               <Button
                 variant="destructive"
                 size="sm"
+                data-testid="provider-disconnect-button"
                 onClick={() => setShowDisconnectWarning(true)}
                 loading={isDeleting || isFetchingAfterDisconnect}
                 disabled={isDeleting || isFetchingAfterDisconnect || isSaving}
               >
-                Disconnect
+                {t("modelProviders.disconnectButton")}
               </Button>
             )}
             <Button
               onClick={onSave}
               size="sm"
+              data-testid="provider-save-button"
               loading={isLoading || isFetchingModels}
               disabled={!canSave || isLoading || isFetchingModels}
             >
               {validationFailed
-                ? "Retry Save"
+                ? t("modelProviders.retrySaveButton")
                 : isAlreadyConfigured
-                  ? "Replace"
-                  : "Save"}
+                  ? t("modelProviders.replaceButton")
+                  : t("modelProviders.saveButton")}
             </Button>
           </div>
         </div>
@@ -347,16 +410,23 @@ const ProviderConfigurationForm = ({
             disabled={selectedProvider.is_enabled}
           >
             {selectedProvider.is_enabled
-              ? `${selectedProvider.provider} Activated`
-              : `Activate ${selectedProvider.provider}`}
+              ? t("modelProviders.activatedButton", {
+                  provider: selectedProvider.provider,
+                })
+              : t("modelProviders.activateButton", {
+                  provider: selectedProvider.provider,
+                })}
           </Button>
           {selectedProvider.is_enabled && (
             <Button
               variant="destructive"
+              data-testid="provider-deactivate-button"
               onClick={() => setShowDisconnectWarning(true)}
               disabled={isDeleting || isPending}
             >
-              Deactivate {selectedProvider.provider}
+              {t("modelProviders.deactivateButton", {
+                provider: selectedProvider.provider,
+              })}
             </Button>
           )}
         </div>
@@ -366,8 +436,10 @@ const ProviderConfigurationForm = ({
         show={showDisconnectWarning}
         message={
           requiresConfiguration
-            ? "Disconnecting an API key will disable all of the provider's models being used in a flow."
-            : `Deactivating ${selectedProvider.provider} will disable all of the provider's models being used in a flow.`
+            ? t("modelProviders.disconnectApiKeyWarning")
+            : t("modelProviders.deactivateWarning", {
+                provider: selectedProvider.provider,
+              })
         }
         onCancel={() => setShowDisconnectWarning(false)}
         onConfirm={() => {
@@ -375,7 +447,6 @@ const ProviderConfigurationForm = ({
           setShowDisconnectWarning(false);
         }}
         isLoading={isDeleting}
-        className="absolute inset-0 m-4 bg-background z-50 border-destructive border h-[165px]"
       />
     </div>
   );

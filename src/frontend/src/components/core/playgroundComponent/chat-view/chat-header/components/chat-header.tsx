@@ -1,4 +1,5 @@
-import React, { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { AnimatedConditional } from "@/components/ui/animated-close";
 import useAlertStore from "@/stores/alertStore";
 import { cn } from "@/utils/utils";
@@ -26,12 +27,17 @@ export function ChatHeader({
   onClose,
   openLogsModal,
   setOpenLogsModal,
+  logsModalTriggerRef,
   onRenameSession,
   onClearChat,
 }: ChatHeaderProps & { sessions: string[] }) {
   // State to coordinate menu open/close
+  const { t } = useTranslation();
   const [sessionsDropdownOpen, setSessionsDropdownOpen] = useState(false);
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const internalLogsModalTriggerRef = useRef<HTMLElement | null>(null);
+  const resolvedLogsModalTriggerRef =
+    logsModalTriggerRef ?? internalLogsModalTriggerRef;
   // Determine the title based on the current session
   const sessionTitle = useMemo(
     () => getSessionTitle(currentSessionId, currentFlowId),
@@ -57,18 +63,21 @@ export function ChatHeader({
   const handleDeleteSessionInternal = () => {
     if (!currentSessionId || isDefaultSession || !currentFlowId) return;
     onDeleteSession?.(currentSessionId);
-    setSuccessData({ title: "Session deleted successfully." });
+    setSuccessData({ title: t("success.sessionDeleted") });
   };
 
   const handleClearChat = () => {
     if (!currentSessionId || !isDefaultSession || !currentFlowId) return;
     onClearChat?.();
-    setSuccessData({ title: "Chat cleared successfully." });
+    setSuccessData({ title: t("success.chatCleared") });
   };
 
   const { onMessageLogs } = useSessionMoreMenuHandlers({
     currentSessionId,
-    onOpenLogs: () => setOpenLogsModal?.(true),
+    onOpenLogs: (triggerElement) => {
+      resolvedLogsModalTriggerRef.current = triggerElement;
+      setOpenLogsModal?.(true);
+    },
   });
 
   const hasMessages = useSessionHasMessages({
@@ -91,7 +100,7 @@ export function ChatHeader({
         sideOffset={4}
         contentClassName="z-[100] [&>div.p-1]:!h-auto [&>div.p-1]:!min-h-0"
         isVisible={true}
-        tooltipContent="More options"
+        tooltipContent={t("playgroundComponent.moreOptions")}
         tooltipSide="left"
         dataTestid="chat-header-more-menu"
         open={moreMenuOpen}
@@ -175,6 +184,7 @@ export function ChatHeader({
           flowId={currentFlowId}
           open={openLogsModal ?? false}
           setOpen={setOpenLogsModal ?? (() => {})}
+          triggerElementRef={resolvedLogsModalTriggerRef}
         />
       )}
     </div>

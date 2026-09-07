@@ -37,15 +37,37 @@ def search_registry(
     query: str | None = None,
     category: str | None = None,
     output_type: str | None = None,
+    *,
+    include_legacy: bool = False,
 ) -> list[dict[str, Any]]:
-    """Search the registry by name/category/output_type. Pure function."""
+    """Search the registry by name/category/output_type. Pure function.
+
+    LEGACY components are excluded by default: the agent's discovery path
+    must not surface deprecated nodes (screenshot 5: a Legacy Calculator).
+    They stay reachable via ``describe_component`` by exact name, and an
+    explicit ``include_legacy=True`` opt-in still lists them.
+
+    BETA components ARE included (user decision 2026-05-18): they are
+    usable, just newer — only legacy is hidden.
+    """
     results = []
     for name, tmpl in sorted(registry.items()):
+        if not include_legacy and tmpl.get("legacy"):
+            continue
         cat = tmpl.get("category", "")
         if category and cat.lower() != category.lower():
             continue
-        if query and query.lower() not in name.lower() and query.lower() not in cat.lower():
-            continue
+        if query:
+            query_lower = query.lower()
+            display_name = tmpl.get("display_name", "")
+            description = tmpl.get("description", "")
+            if (
+                query_lower not in name.lower()
+                and query_lower not in cat.lower()
+                and query_lower not in display_name.lower()
+                and query_lower not in description.lower()
+            ):
+                continue
         if output_type:
             all_types = [t for o in tmpl.get("outputs", []) for t in o.get("types", [])]
             if output_type not in all_types:
@@ -69,17 +91,47 @@ def describe_component(registry: dict[str, dict], component_type: str) -> dict[s
         raise ValueError(msg)
 
     tmpl = registry[component_type]
-    outputs = [{"name": o["name"], "types": o.get("types", [])} for o in tmpl.get("outputs", [])]
+    outputs = []
+    loop_inputs = []
+    for o in tmpl.get("outputs", []):
+        entry: dict[str, Any] = {"name": o["name"], "types": o.get("types", [])}
+        if o.get("allows_loop"):
+            # An allows_loop output doubles as the loop-feedback target (Loop.item):
+            # surface it as an input too, or the agent cannot discover loop wiring.
+            entry["allows_loop"] = True
+            types = o.get("types") or []
+            selected = o.get("selected") or (types[0] if types else "Message")
+            loop_inputs.append(
+                {
+                    "name": o["name"],
+                    "input_types": [selected, *(o.get("loop_types") or [])],
+                    "type": "loop",
+                    "required": False,
+                    "description": "Loop feedback input: connect the loop body's final output back here.",
+                }
+            )
+        outputs.append(entry)
 
-    # If any output supports tool_mode, add component_as_tool as an available output
-    tool_mode_outputs = [o["name"] for o in tmpl.get("outputs", []) if o.get("tool_mode")]
-    if tool_mode_outputs:
-        uses = ", ".join(tool_mode_outputs)
+    # Tool mode = any INPUT field with tool_mode=True, or the class opting in via
+    # add_tool_output — both halves of Component._handle_tool_mode, the runtime
+    # authority. Output-side tool_mode marks which outputs a toolset exposes, not
+    # whether the component has one (89 of the 127 bundled components set it,
+    # ChatInput included), so advertising on it promised a toolset that the
+    # runtime never creates.
+    template_fields = tmpl.get("template", {})
+    tool_mode_inputs = [
+        name for name, fdata in template_fields.items() if isinstance(fdata, dict) and fdata.get("tool_mode")
+    ]
+    if tool_mode_inputs or tmpl.get("add_tool_output"):
+        description = "Wraps this component as a Tool"
+        if tool_mode_inputs:
+            description += f" (tool inputs: {', '.join(tool_mode_inputs)})"
+        description += ". Connect to an Agent's 'tools' input."
         outputs.append(
             {
                 "name": "component_as_tool",
                 "types": ["Tool"],
-                "description": f"Wraps this component as a Tool (uses: {uses}). Connect to an Agent's 'tools' input.",
+                "description": description,
             }
         )
     fields = []
@@ -113,16 +165,27 @@ def describe_component(registry: dict[str, dict], component_type: str) -> dict[s
                     field_info["required"] = True
                 fields.append(field_info)
 
+    # Template wins on a name collision (mirrors connect.py's priority):
+    # never describe the same port twice.
+    template_input_names = {name for name, fdata in template_fields.items() if isinstance(fdata, dict) and fdata}
+    loop_inputs = [li for li in loop_inputs if li["name"] not in template_input_names]
+
     result: dict[str, Any] = {
         "type": component_type,
         "category": tmpl.get("category", ""),
         "display_name": tmpl.get("display_name", component_type),
         "description": tmpl.get("description", ""),
         "outputs": outputs,
-        "inputs": inputs,
+        "inputs": [*inputs, *loop_inputs],
     }
     if fields:
         result["fields"] = fields
     if advanced_fields:
         result["advanced_fields"] = sorted(advanced_fields)
+    # search_registry hides legacy/beta, but describe-by-exact-name still
+    # reaches them — flag so the agent knows what it picked.
+    if tmpl.get("legacy"):
+        result["legacy"] = True
+    if tmpl.get("beta"):
+        result["beta"] = True
     return result

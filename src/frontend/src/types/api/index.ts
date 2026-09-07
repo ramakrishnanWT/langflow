@@ -14,6 +14,15 @@ export type APITemplateType = {
   [key: string]: InputFieldType;
 };
 
+export type ComponentDisplayNamesType = Record<
+  string,
+  {
+    display_name: string[];
+    description: string[];
+    fields?: Record<string, { display_name: string[] }>;
+  }
+>;
+
 export type APICodeValidateType = {
   imports: { errors: Array<string> };
   function: { errors: Array<string> };
@@ -87,8 +96,10 @@ export type InputFieldType = {
   readonly: boolean;
   password?: boolean;
   multiline?: boolean;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   value?: any;
   dynamic?: boolean;
+  api_editable?: boolean;
   proxy?: { id: string; field: string };
   input_types?: Array<string>;
   display_name?: string;
@@ -98,8 +109,10 @@ export type InputFieldType = {
   refresh_button_text?: string;
   combobox?: boolean;
   info?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   options?: any[];
   active_tab?: number;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   [key: string]: any;
   icon?: string;
   text?: string;
@@ -120,10 +133,12 @@ export type OutputFieldType = {
   group_outputs?: boolean;
   method?: string;
   display_name: string;
+  info?: string;
   hidden?: boolean;
   proxy?: OutputFieldProxyType;
   allows_loop?: boolean;
   loop_types?: Array<string>;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   options?: { [key: string]: any };
 };
 export type errorsTypeAPI = {
@@ -182,8 +197,8 @@ export type changeUser = {
 };
 
 export type resetPasswordType = {
-  password?: string;
-  profile_image?: string;
+  current_password: string;
+  password: string;
 };
 
 export type Users = {
@@ -224,8 +239,10 @@ export type VertexBuildTypeAPI = {
   valid: boolean;
   data: VertexDataTypeAPI;
   timestamp: string;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   params: any;
   messages: ChatOutputType[] | ChatInputType[];
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   artifacts: any | ChatOutputType | ChatInputType;
 };
 
@@ -235,11 +252,13 @@ export type ErrorLogType = {
 };
 
 export type OutputLogType = {
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   message: any | ErrorLogType;
   type: string;
 };
 export type LogsLogType = {
   name: string;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   message: any | ErrorLogType;
   type: string;
 };
@@ -254,6 +273,7 @@ export type VertexDataTypeAPI = {
   inactive?: boolean;
   timedelta?: number;
   duration?: string;
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   artifacts?: any | ChatOutputType | ChatInputType;
   message?: ChatOutputType | ChatInputType;
   token_usage?: UsageType | null;
@@ -277,6 +297,7 @@ export type ResponseErrorDetailAPI = {
 };
 export type useQueryFunctionType<
   T = undefined,
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   R = any,
   O = {},
 > = T extends undefined
@@ -292,30 +313,40 @@ export type QueryFunctionType = (
   queryKey: UseQueryOptions["queryKey"],
   queryFn: UseQueryOptions["queryFn"],
   options?: Omit<UseQueryOptions, "queryKey" | "queryFn">,
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
 ) => UseQueryResult<any>;
 
 export type MutationFunctionType = (
   mutationKey: UseMutationOptions["mutationKey"],
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   mutationFn: UseMutationOptions<any, any, any>["mutationFn"],
-  options?: Omit<UseMutationOptions<any, any>, "mutationFn" | "mutationKey">,
+  options?: Omit<
+    // biome-ignore lint/suspicious/noExplicitAny: legacy
+    UseMutationOptions<any, any, any, any>,
+    "mutationFn" | "mutationKey"
+  >,
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
 ) => UseMutationResult<any, any, any, any>;
 
 export type useMutationFunctionType<
   Params,
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   Variables = any,
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   Data = any,
+  // biome-ignore lint/suspicious/noExplicitAny: legacy
   Error = any,
 > = Params extends undefined
   ? (
       options?: Omit<
-        UseMutationOptions<Data, Error>,
+        UseMutationOptions<Data, Error, Variables>,
         "mutationFn" | "mutationKey"
       >,
     ) => UseMutationResult<Data, Error, Variables>
   : (
       params: Params,
       options?: Omit<
-        UseMutationOptions<Data, Error>,
+        UseMutationOptions<Data, Error, Variables>,
         "mutationFn" | "mutationKey"
       >,
     ) => UseMutationResult<Data, Error, Variables>;

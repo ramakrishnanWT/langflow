@@ -3,11 +3,16 @@ from __future__ import annotations
 import asyncio
 import re
 from copy import deepcopy
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import pandas as pd
+
+# LangChain resolves these annotations at runtime to inject config and callback managers.
+from langchain_core.callbacks import AsyncCallbackManagerForToolRun, CallbackManagerForToolRun  # noqa: TC002
+from langchain_core.runnables import RunnableConfig  # noqa: TC002
 from langchain_core.tools import BaseTool, ToolException
 from langchain_core.tools.structured import StructuredTool
+from typing_extensions import override
 
 from lfx.base.tools.constants import TOOL_OUTPUT_NAME
 from lfx.log.logger import logger
@@ -29,6 +34,43 @@ if TYPE_CHECKING:
 TOOL_TYPES_SET = {"Tool", "BaseTool", "StructuredTool"}
 
 
+class ComponentStructuredTool(StructuredTool):
+    """StructuredTool that keeps JSON-safe component results as LangChain artifacts."""
+
+    response_format: Literal["content_and_artifact"] = "content_and_artifact"
+
+    @staticmethod
+    def _content_and_artifact(content: Any) -> tuple[Any, Any | None]:
+        artifact = None if isinstance(content, str) else serialize(content)
+        return content, artifact
+
+    @override
+    def _run(
+        self,
+        *args: Any,
+        config: RunnableConfig,
+        run_manager: CallbackManagerForToolRun | None = None,
+        **kwargs: Any,
+    ) -> tuple[Any, Any | None]:
+        content = super()._run(*args, config=config, run_manager=run_manager, **kwargs)
+        return self._content_and_artifact(content)
+
+    @override
+    async def _arun(
+        self,
+        *args: Any,
+        config: RunnableConfig,
+        run_manager: AsyncCallbackManagerForToolRun | None = None,
+        **kwargs: Any,
+    ) -> tuple[Any, Any | None]:
+        if self.coroutine is None:
+            # StructuredTool falls back to self._run, which already returns the
+            # content-and-artifact tuple. Wrapping it again would nest the tuple.
+            return await super()._arun(*args, config=config, run_manager=run_manager, **kwargs)
+        content = await super()._arun(*args, config=config, run_manager=run_manager, **kwargs)
+        return self._content_and_artifact(content)
+
+
 def _get_input_type(input_: InputTypes):
     if input_.input_types:
         if len(input_.input_types) == 1:
@@ -37,7 +79,10 @@ def _get_input_type(input_: InputTypes):
     return input_.field_type
 
 
-def build_description(component: Component) -> str:
+def build_description(component: Component, output=None) -> str:
+    """Build tool description, preferring output-level info over component description."""
+    if output and getattr(output, "info", None):
+        return output.info
     return component.description or ""
 
 
@@ -57,33 +102,6 @@ def patch_components_send_message(component: Component):
     return old_send_message
 
 
-def _patch_send_message_decorator(component, func):
-    """Decorator to patch the send_message method of a component.
-
-    This is useful when we want to use a component as a tool, but we don't want to
-    send any messages to the UI. With this only the Component calling the tool
-    will send messages to the UI.
-    """
-
-    async def async_wrapper(*args, **kwargs):
-        original_send_message = component.send_message
-        component.send_message = send_message_noop
-        try:
-            return await func(*args, **kwargs)
-        finally:
-            component.send_message = original_send_message
-
-    def sync_wrapper(*args, **kwargs):
-        original_send_message = component.send_message
-        component.send_message = send_message_noop
-        try:
-            return func(*args, **kwargs)
-        finally:
-            component.send_message = original_send_message
-
-    return async_wrapper if asyncio.iscoroutinefunction(func) else sync_wrapper
-
-
 def _build_output_function(
     component: Component,
     output_method: Callable,
@@ -91,21 +109,33 @@ def _build_output_function(
     output_name: str = TOOL_OUTPUT_NAME,
 ):
     method_name = output_method.__name__
+    # Capture tool_mode input names so positional args can be mapped to kwargs
+    _tool_input_names = [inp.name for inp in component.inputs if getattr(inp, "tool_mode", False)]
 
     def output_function(*args, **kwargs):
+        # Map positional args to keyword args using tool_mode input names
+        if args:
+            for i, val in enumerate(args):
+                if i < len(_tool_input_names) and _tool_input_names[i] not in kwargs:
+                    kwargs[_tool_input_names[i]] = val
         # Create an isolated copy to prevent race conditions when this
         # tool is invoked concurrently by an agent (GitHub issue #8791)
         comp = deepcopy(component)
+        # Nothing patches send_message here. Silencing the shared component leaked across
+        # overlapping calls: the second call recorded the first call's no-op as the method
+        # to restore, and restored it once the first call had put the real one back.
+        # Suppressing the tool run's own messages is a separate change, tracked on its own.
         local_method = getattr(comp, method_name, output_method)
         build_started = False
         result = None
         try:
+            comp._ensure_code_execution_policy()  # noqa: SLF001
             if event_manager:
                 event_manager.on_build_start(data={"id": comp.get_id()})
                 build_started = True
             comp.set_event_manager(event_manager)
             comp.set_current_output(output_name)
-            comp.set(*args, **kwargs)
+            comp.set(**kwargs)
             result = local_method()
         except Exception as e:
             logger.error(
@@ -125,10 +155,12 @@ def _build_output_function(
             return result.get_text()
         if isinstance(result, Data):
             return result.data
+        if isinstance(result, pd.DataFrame):
+            return result
         # removing the model_dump() call here because it is not serializable
         return serialize(result)
 
-    return _patch_send_message_decorator(component, output_function)
+    return output_function
 
 
 def _build_output_async_function(
@@ -138,21 +170,30 @@ def _build_output_async_function(
     output_name: str = TOOL_OUTPUT_NAME,
 ):
     method_name = output_method.__name__
+    # Capture tool_mode input names so positional args can be mapped to kwargs
+    _tool_input_names = [inp.name for inp in component.inputs if getattr(inp, "tool_mode", False)]
 
     async def output_function(*args, **kwargs):
+        # Map positional args to keyword args using tool_mode input names
+        if args:
+            for i, val in enumerate(args):
+                if i < len(_tool_input_names) and _tool_input_names[i] not in kwargs:
+                    kwargs[_tool_input_names[i]] = val
         # Create an isolated copy to prevent race conditions when this
         # tool is invoked concurrently by an agent (GitHub issue #8791)
         comp = deepcopy(component)
+        # See _build_output_function: a tool call must not patch send_message anywhere.
         local_method = getattr(comp, method_name, output_method)
         build_started = False
         result = None
         try:
+            comp._ensure_code_execution_policy()  # noqa: SLF001
             if event_manager:
                 event_manager.on_build_start(data={"id": comp.get_id()})
                 build_started = True
             comp.set_event_manager(event_manager)
             comp.set_current_output(output_name)
-            comp.set(*args, **kwargs)
+            comp.set(**kwargs)
             result = await local_method()
         except Exception as e:
             logger.error(
@@ -171,10 +212,12 @@ def _build_output_async_function(
             return result.get_text()
         if isinstance(result, Data):
             return result.data
+        if isinstance(result, pd.DataFrame):
+            return result
         # removing the model_dump() call here because it is not serializable
         return serialize(result)
 
-    return _patch_send_message_decorator(component, output_function)
+    return output_function
 
 
 def _format_tool_name(name: str):
@@ -182,6 +225,55 @@ def _format_tool_name(name: str):
     # to do that we must remove all non-alphanumeric characters
 
     return re.sub(r"[^a-zA-Z0-9_-]", "-", name)
+
+
+# Method names that carry no semantic signal about what the tool DOES. When
+# a single-output component uses one of these, the LLM-facing tool name is
+# derived from the component class name instead — the class name is the
+# user's stated intent (e.g. ``RandomMenuItem``, ``DrinkPrice``) and is
+# always more informative than ``output``/``process``. Kept narrow on
+# purpose: descriptive method names (``get_forecast``, ``search_products``)
+# must NOT be overridden, and multi-output components must NOT be
+# collapsed to a single name (that would shadow tools).
+_GENERIC_OUTPUT_METHOD_NAMES = frozenset(
+    {"output", "process", "build_output", "run", "execute", "main", "handler", "build_result"}
+)
+
+
+def _class_name_to_tool_name(class_name: str) -> str:
+    """CamelCase → snake_case, preserving acronym boundaries.
+
+    Examples:
+        RandomMenuItem  → random_menu_item
+        DrinkPrice      → drink_price
+        HTTPClient      → http_client
+        S3Bucket        → s3_bucket
+        MyXMLParser     → my_xml_parser
+        Already_snake   → already_snake (passthrough)
+    """
+    # Insert underscore between acronym and following CamelCase word
+    # ("HTTPClient" → "HTTP_Client", "MyXMLParser" → "My_XMLParser")
+    step1 = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", class_name)
+    # Insert underscore between lowercase/digit and uppercase
+    # ("RandomMenu" → "Random_Menu", "S3Bucket" → "S3_Bucket")
+    step2 = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", step1)
+    return step2.lower()
+
+
+def _derive_tool_name(component: Component, output_method: str, outputs: list[Output]) -> str:
+    """Pick a tool name that an LLM can act on.
+
+    Defaults to the output's method name (existing contract). Falls back to
+    the snake_cased component class name only when:
+
+    1. The method name is generic (``output``/``process``/...) — i.e. it
+       carries no semantic signal.
+    2. The component has exactly one tool-exposed output. Multi-output
+       components keep method-derived names so each tool stays distinct.
+    """
+    if output_method in _GENERIC_OUTPUT_METHOD_NAMES and len(outputs) == 1:
+        return _class_name_to_tool_name(type(component).__name__)
+    return output_method
 
 
 def _add_commands_to_tool_description(tool_description: str, commands: str):
@@ -203,13 +295,29 @@ class ComponentToolkit:
             bool: True if the output should be skipped, False otherwise.
 
         The output will be skipped if:
-        - tool_mode is False (output is not meant to be used as a tool)
-        - output name matches TOOL_OUTPUT_NAME
-        - output types contain any of the tool types in TOOL_TYPES_SET
+        - tool_mode is False (the user opted this output out of tool exposure)
+        - it is the SYNTHETIC output that ``_append_tool_to_outputs_map`` adds
+          when the component is flipped to tool mode (name + method + types
+          all match — those three together uniquely identify the synthetic,
+          whereas matching on name alone wrongly skipped LLM-generated user
+          components whose Output happened to be named ``component_as_tool``,
+          producing an empty tool list — production failure 2026-05-27).
+        - the output is already a Tool-typed handoff (anything in
+          ``TOOL_TYPES_SET``) — wrapping a Tool in another Tool is a no-op.
         """
-        return not output.tool_mode or (
-            output.name == TOOL_OUTPUT_NAME or any(tool_type in output.types for tool_type in TOOL_TYPES_SET)
+        if not output.tool_mode:
+            return True
+        # Synthetic-tool sentinel: name + method + types ALL match. Anything
+        # less is a user-declared output that happens to share the name.
+        is_synthetic_tool = (
+            output.name == TOOL_OUTPUT_NAME
+            and output.method == "to_toolkit"
+            and any(tool_type in output.types for tool_type in TOOL_TYPES_SET)
         )
+        if is_synthetic_tool:
+            return True
+        # Already-a-Tool outputs short-circuit too.
+        return any(tool_type in output.types for tool_type in TOOL_TYPES_SET)
 
     def get_tools(
         self,
@@ -221,10 +329,10 @@ class ComponentToolkit:
         from lfx.io.schema import create_input_schema, create_input_schema_from_dict
 
         tools = []
-        for output in self.component.outputs:
-            if self._should_skip_output(output):
-                continue
-
+        # Resolve up front: tool_mode-eligible outputs gate the class-name
+        # fallback below (only safe for single-output components).
+        eligible_outputs = [o for o in self.component.outputs if not self._should_skip_output(o)]
+        for output in eligible_outputs:
             if not output.method:
                 msg = f"Output {output.name} does not have a method defined"
                 raise ValueError(msg)
@@ -267,14 +375,14 @@ class ComponentToolkit:
             else:
                 args_schema = create_input_schema(self.component.inputs)
 
-            name = f"{output.method}".strip(".")
+            name = _derive_tool_name(self.component, f"{output.method}".strip("."), eligible_outputs)
             formatted_name = _format_tool_name(name)
             event_manager = self.component.get_event_manager()
             if asyncio.iscoroutinefunction(output_method):
                 tools.append(
-                    StructuredTool(
+                    ComponentStructuredTool(
                         name=formatted_name,
-                        description=build_description(self.component),
+                        description=build_description(self.component, output),
                         coroutine=_build_output_async_function(
                             self.component, output_method, event_manager, TOOL_OUTPUT_NAME
                         ),
@@ -284,15 +392,15 @@ class ComponentToolkit:
                         tags=[formatted_name],
                         metadata={
                             "display_name": formatted_name,
-                            "display_description": build_description(self.component),
+                            "display_description": build_description(self.component, output),
                         },
                     )
                 )
             else:
                 tools.append(
-                    StructuredTool(
+                    ComponentStructuredTool(
                         name=formatted_name,
-                        description=build_description(self.component),
+                        description=build_description(self.component, output),
                         func=_build_output_function(self.component, output_method, event_manager, TOOL_OUTPUT_NAME),
                         args_schema=args_schema,
                         handle_tool_error=True,
@@ -300,7 +408,7 @@ class ComponentToolkit:
                         tags=[formatted_name],
                         metadata={
                             "display_name": formatted_name,
-                            "display_description": build_description(self.component),
+                            "display_description": build_description(self.component, output),
                         },
                     )
                 )
@@ -312,9 +420,11 @@ class ComponentToolkit:
         elif (tool_name or tool_description) and (flow_mode_inputs or len(tools) > 1):
             for tool in tools:
                 tool.name = _format_tool_name(str(tool_name) + "_" + str(tool.name)) or tool.name
-                tool.description = (
-                    str(tool_description) + " Output details: " + str(tool.description)
-                ) or tool.description
+                # Only prepend an explicit tool_description. Without one, keep the
+                # output-derived description so it stays equal to display_description
+                # and the Actions-panel merge logic can detect real user edits.
+                if tool_description:
+                    tool.description = f"{tool_description} Output details: {tool.description}"
                 tool.tags = [tool.name]
         return tools
 
@@ -352,6 +462,11 @@ class ComponentToolkit:
                         if tool_metadata.get("status", True):
                             tool.name = tool_metadata.get("name", tool.name)
                             tool.description = tool_metadata.get("description", tool.description)
+                            # Carry the per-action HITL decisions onto the tool so the
+                            # agent gates exactly what the user selected (LE-1447).
+                            if tool.metadata is None:
+                                tool.metadata = {}
+                            tool.metadata["approval_actions"] = tool_metadata.get("approval_actions") or []
                             if tool_metadata.get("commands"):
                                 tool.description = _add_commands_to_tool_description(
                                     tool.description, tool_metadata.get("commands")

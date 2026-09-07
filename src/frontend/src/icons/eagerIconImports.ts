@@ -39,11 +39,7 @@ import { GleanIcon } from "@/icons/Glean";
 import { GoogleIcon } from "@/icons/Google";
 import { GoogleDriveIcon } from "@/icons/GoogleDrive";
 import { GoogleGenerativeAIIcon } from "@/icons/GoogleGenerativeAI";
-import {
-  GradientInfinity,
-  GradientSave,
-  GradientUngroup,
-} from "@/icons/GradientSparkles";
+import { GradientInfinity, GradientUngroup } from "@/icons/GradientSparkles";
 import { GridHorizontalIcon } from "@/icons/GridHorizontal";
 import { GroqIcon } from "@/icons/Groq";
 import { GlobeOkIcon } from "@/icons/globe-ok";
@@ -52,7 +48,12 @@ import { HCDIcon } from "@/icons/HCD";
 import { HomeAssistantIcon } from "@/icons/HomeAssistant";
 import { HuggingFaceIcon } from "@/icons/HuggingFace";
 import { HackerNewsIcon } from "@/icons/hackerNews";
-import { IBMIcon, WatsonxAiIcon, WatsonxOrchestrateIcon } from "@/icons/IBM";
+import {
+  IBMIcon,
+  WatsonxAiIcon,
+  WatsonxDataIcon,
+  WatsonxOrchestrateIcon,
+} from "@/icons/IBM";
 import { IcosaIcon } from "@/icons/Icosa";
 import { IFixIcon } from "@/icons/IFixIt";
 import { JSIcon } from "@/icons/JSicon";
@@ -66,6 +67,7 @@ import { MetaIcon } from "@/icons/Meta";
 import { MidjourneyIcon } from "@/icons/Midjorney";
 import { MilvusIcon } from "@/icons/Milvus";
 import { MongoDBIcon } from "@/icons/MongoDB";
+import { MrscraperIcon } from "@/icons/Mrscraper";
 import { MistralIcon } from "@/icons/mistral";
 import { NeedleIcon } from "@/icons/Needle";
 import { NotDiamondIcon } from "@/icons/NotDiamond";
@@ -78,6 +80,7 @@ import { OneDriveIcon } from "@/icons/OneDrive";
 import { OpenAiIcon } from "@/icons/OpenAi";
 import { OpenRouterIcon } from "@/icons/OpenRouter";
 import { OpenSearch } from "@/icons/OpenSearch";
+import { OracleIcon } from "@/icons/Oracle";
 import { PerplexityIcon } from "@/icons/Perplexity";
 import { PineconeIcon } from "@/icons/Pinecone";
 import { PostgresIcon } from "@/icons/Postgres";
@@ -167,7 +170,6 @@ export const eagerIconsMapping = {
   GoogleGenerativeAI: GoogleGenerativeAIIcon,
   Gmail: GmailIcon,
   GradientInfinity: GradientInfinity,
-  GradientSave: GradientSave,
   GradientUngroup: GradientUngroup,
   GridHorizontal: GridHorizontalIcon,
   Groq: GroqIcon,
@@ -191,6 +193,7 @@ export const eagerIconsMapping = {
   Milvus: MilvusIcon,
   Mistral: MistralIcon,
   MongoDB: MongoDBIcon,
+  Mrscraper: MrscraperIcon,
   Needle: NeedleIcon,
   NotDiamond: NotDiamondIcon,
   Notion: NotionIcon,
@@ -202,6 +205,7 @@ export const eagerIconsMapping = {
   OpenAI: OpenAiIcon,
   OpenRouter: OpenRouterIcon,
   OpenSearch: OpenSearch,
+  Oracle: OracleIcon,
   Perplexity: PerplexityIcon,
   Pinecone: PineconeIcon,
   Postgres: PostgresIcon,
@@ -235,6 +239,7 @@ export const eagerIconsMapping = {
   VertexAI: VertexAIIcon,
   vLLM: VllmIcon,
   WatsonxAI: WatsonxAiIcon,
+  WatsonxData: WatsonxDataIcon,
   WatsonxOrchestrate: WatsonxOrchestrateIcon,
   Weaviate: WeaviateIcon,
   Wikipedia: WikipediaIcon,

@@ -1,5 +1,6 @@
 import copy
 import json
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +16,8 @@ from lfx.graph.graph.utils import (
 )
 from lfx.graph.vertex.base import Vertex
 from lfx.interface.components import component_cache
-from lfx.utils.flow_validation import CustomComponentValidationError
+from lfx.services.catalog_policy import CatalogPolicySnapshot
+from lfx.utils.flow_validation import CatalogPolicyValidationError, CustomComponentValidationError
 
 # Test cases for the graph module
 
@@ -115,6 +117,14 @@ def test_invalid_node_types():
         g.add_nodes_and_edges(graph_data["nodes"], graph_data["edges"])
 
 
+def test_graph_copy_and_pickle_preserve_source_flow_id():
+    graph = Graph()
+    graph.source_flow_id = "source-flow"
+
+    assert copy.deepcopy(graph).source_flow_id == "source-flow"
+    assert pickle.loads(pickle.dumps(graph)).source_flow_id == "source-flow"  # noqa: S301
+
+
 def test_from_payload_blocks_custom_components_when_disabled(monkeypatch):
     monkeypatch.setattr(
         "lfx.services.deps.get_settings_service",
@@ -125,6 +135,204 @@ def test_from_payload_blocks_custom_components_when_disabled(monkeypatch):
 
     with pytest.raises(CustomComponentValidationError, match="custom components are not allowed"):
         Graph.from_payload(_blocked_custom_flow())
+
+
+@pytest.mark.parametrize(
+    "blocked_key",
+    [
+        "DuckDuckGoSearchComponent",
+        "ext:duckduckgo:DuckDuckGoSearchComponent@official",
+    ],
+)
+def test_from_payload_checks_catalog_policy_before_and_after_extension_migration(monkeypatch, blocked_key):
+    class CountingCatalogPolicyService:
+        def __init__(self):
+            self.snapshot_calls = 0
+
+        @property
+        def snapshot(self):
+            self.snapshot_calls += 1
+            return CatalogPolicySnapshot(blocked_component_keys=frozenset({blocked_key}))
+
+    service = CountingCatalogPolicyService()
+    payload = {
+        "nodes": [
+            {
+                "id": "duck-search",
+                "type": "genericNode",
+                "data": {
+                    "id": "duck-search",
+                    "type": "DuckDuckGoSearchComponent",
+                    "node": {"template": {}},
+                },
+            }
+        ],
+        "edges": [],
+    }
+    monkeypatch.setattr(
+        "lfx.services.deps.get_settings_service",
+        lambda: _settings_service(allow_custom_components=True),
+    )
+    monkeypatch.setattr("lfx.services.deps.get_catalog_policy_service", lambda: service)
+
+    with pytest.raises(CatalogPolicyValidationError, match=blocked_key):
+        Graph.from_payload(payload)
+
+    assert service.snapshot_calls == 1
+
+
+def test_from_payload_checks_canonical_policy_for_nested_legacy_component(monkeypatch):
+    canonical_key = "ext:duckduckgo:DuckDuckGoSearchComponent@official"
+    service = SimpleNamespace(
+        snapshot=CatalogPolicySnapshot(blocked_component_keys=frozenset({canonical_key})),
+    )
+    nested_node = {
+        "id": "duck-search",
+        "type": "genericNode",
+        "data": {
+            "id": "duck-search",
+            "type": "DuckDuckGoSearchComponent",
+            "node": {"template": {}},
+        },
+    }
+    payload = {
+        "nodes": [
+            {
+                "id": "group-1",
+                "type": "genericNode",
+                "data": {
+                    "id": "group-1",
+                    "type": "Group",
+                    "node": {
+                        "template": {},
+                        "flow": {
+                            "data": {
+                                "nodes": [nested_node],
+                                "edges": [],
+                            }
+                        },
+                    },
+                },
+            }
+        ],
+        "edges": [],
+    }
+    monkeypatch.setattr(
+        "lfx.services.deps.get_settings_service",
+        lambda: _settings_service(allow_custom_components=True),
+    )
+    monkeypatch.setattr("lfx.services.deps.get_catalog_policy_service", lambda: service)
+
+    with pytest.raises(CatalogPolicyValidationError, match=canonical_key):
+        Graph.from_payload(payload)
+
+
+def test_from_payload_catalog_policy_preserves_invalid_payload_error_mapping(monkeypatch):
+    service = SimpleNamespace(
+        snapshot=CatalogPolicySnapshot(blocked_component_keys=frozenset({"Agent"})),
+    )
+    monkeypatch.setattr(
+        "lfx.services.deps.get_settings_service",
+        lambda: _settings_service(allow_custom_components=True),
+    )
+    monkeypatch.setattr("lfx.services.deps.get_catalog_policy_service", lambda: service)
+
+    with pytest.raises(ValueError, match="Error while creating graph from payload"):
+        Graph.from_payload({"edges": []})
+
+
+def test_warm_template_defers_constructors_until_user_bound_copy(monkeypatch):
+    """Preloading must not execute components, and run copies bind identity first."""
+    events: list[tuple[str, str | None]] = []
+
+    monkeypatch.setattr(
+        Graph,
+        "_instantiate_components_in_vertices",
+        lambda graph: events.append(("construct", graph.user_id)),
+    )
+
+    template = Graph.from_payload(
+        {"nodes": [], "edges": []},
+        flow_id="flow-id",
+        instantiate_components=False,
+    )
+    assert events == []
+
+    run_graph = template.copy_for_run(
+        user_id="caller-id",
+        before_instantiate=lambda graph: events.append(("prepare", graph.user_id)),
+    )
+
+    assert events == [("prepare", "caller-id"), ("construct", "caller-id")]
+    assert run_graph.user_id == "caller-id"
+    assert template.user_id is None
+
+
+def test_copy_for_run_preserves_grouped_flow_shape(monkeypatch):
+    """Run copies must retain group roots instead of promoting their children."""
+    child = {
+        "id": "child-1",
+        "type": "genericNode",
+        "data": {
+            "id": "child-1",
+            "type": "Generic",
+            "node": {
+                "template": {
+                    "_type": "Generic",
+                    "stream": {"name": "stream", "type": "bool", "value": True, "list": False},
+                },
+                "base_classes": [],
+                "display_name": "Child",
+                "outputs": [],
+            },
+        },
+    }
+    grouped_data = {
+        "nodes": [
+            {
+                "id": "group-1",
+                "type": "genericNode",
+                "data": {
+                    "id": "group-1",
+                    "type": "Group",
+                    "node": {
+                        "template": {},
+                        "flow": {"data": {"nodes": [child], "edges": []}},
+                    },
+                },
+            }
+        ],
+        "edges": [],
+    }
+    monkeypatch.setattr(Graph, "_instantiate_components_in_vertices", lambda _graph: None)
+
+    template = Graph(flow_id="flow-id", instantiate_components=False)
+    template.add_nodes_and_edges(grouped_data["nodes"], grouped_data["edges"])
+    template.requires_extension_event_replay = True
+    run_graph = template.copy_for_run(user_id="caller-id")
+
+    assert run_graph.raw_graph_data == template.raw_graph_data
+    assert run_graph.raw_graph_data is not template.raw_graph_data
+    assert run_graph.top_level_vertices == template.top_level_vertices == [grouped_data["nodes"][0]["id"]]
+    assert {vertex.id: vertex.parent_is_top_level for vertex in run_graph.vertices} == {
+        vertex.id: vertex.parent_is_top_level for vertex in template.vertices
+    }
+    assert any(vertex.parent_is_top_level for vertex in run_graph.vertices)
+    assert run_graph.requires_extension_event_replay is True
+
+
+def test_graph_state_preserves_lazy_template_flag_and_defaults_old_payloads():
+    """Serialized templates keep their mode while old graph payloads stay eager."""
+    template = Graph(instantiate_components=False)
+    state = template.__getstate__()
+    assert state["_instantiate_components_on_initialize"] is False
+
+    old_state = state.copy()
+    old_state.pop("_instantiate_components_on_initialize")
+    restored = Graph.__new__(Graph)
+    restored.__setstate__(old_state)
+
+    assert restored._instantiate_components_on_initialize is True
 
 
 def test_find_last_node(grouped_chat_json_flow):
@@ -297,6 +505,210 @@ def test_update_source_handle():
     updated_edge = update_source_handle(new_edge, flow_data["nodes"], flow_data["edges"])
     assert updated_edge["source"] == "last_node"
     assert updated_edge["data"]["sourceHandle"]["id"] == "last_node"
+
+
+def test_process_flow_grouped_loop_uses_output_proxy_when_internal_edges_are_cyclic():
+    loop_id = "LoopComponent-loop"
+    converter_id = "TypeConverterComponent-converter"
+    group_id = "groupComponent-loop"
+    sink_id = "ChatOutput-sink"
+    flow_data = {
+        "nodes": [
+            {
+                "id": group_id,
+                "data": {
+                    "id": group_id,
+                    "type": "GroupNode",
+                    "node": {
+                        "template": {},
+                        "outputs": [
+                            {
+                                "name": f"{loop_id}_done",
+                                "proxy": {"id": loop_id, "name": "done", "nodeDisplayName": "Loop"},
+                                "types": ["DataFrame"],
+                            }
+                        ],
+                        "flow": {
+                            "data": {
+                                "nodes": [
+                                    {
+                                        "id": loop_id,
+                                        "data": {
+                                            "type": "LoopComponent",
+                                            "node": {
+                                                "template": {},
+                                                "outputs": [
+                                                    {"name": "item", "types": ["Data"], "allows_loop": True},
+                                                    {"name": "done", "types": ["DataFrame"]},
+                                                ],
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "id": converter_id,
+                                        "data": {
+                                            "type": "TypeConverterComponent",
+                                            "node": {
+                                                "template": {},
+                                                "outputs": [{"name": "message_output", "types": ["Message"]}],
+                                            },
+                                        },
+                                    },
+                                ],
+                                "edges": [
+                                    {
+                                        "source": loop_id,
+                                        "target": converter_id,
+                                        "data": {
+                                            "sourceHandle": {
+                                                "dataType": "LoopComponent",
+                                                "id": loop_id,
+                                                "name": "item",
+                                                "output_types": ["Data"],
+                                            },
+                                            "targetHandle": {
+                                                "fieldName": "input_data",
+                                                "id": converter_id,
+                                                "inputTypes": ["Data"],
+                                                "type": "other",
+                                            },
+                                        },
+                                    },
+                                    {
+                                        "source": converter_id,
+                                        "target": loop_id,
+                                        "data": {
+                                            "sourceHandle": {
+                                                "dataType": "TypeConverterComponent",
+                                                "id": converter_id,
+                                                "name": "message_output",
+                                                "output_types": ["Message"],
+                                            },
+                                            "targetHandle": {
+                                                "dataType": "LoopComponent",
+                                                "id": loop_id,
+                                                "name": "item",
+                                                "output_types": ["Data", "Message"],
+                                            },
+                                        },
+                                    },
+                                ],
+                            }
+                        },
+                    },
+                },
+            },
+            {
+                "id": sink_id,
+                "data": {"type": "ChatOutput", "node": {"template": {}, "outputs": []}},
+            },
+        ],
+        "edges": [
+            {
+                "source": group_id,
+                "target": sink_id,
+                "data": {
+                    "sourceHandle": {
+                        "dataType": "GroupNode",
+                        "id": group_id,
+                        "name": f"{loop_id}_done",
+                        "output_types": ["DataFrame"],
+                    },
+                    "targetHandle": {
+                        "fieldName": "input_value",
+                        "id": sink_id,
+                        "inputTypes": ["DataFrame"],
+                        "type": "other",
+                    },
+                },
+            }
+        ],
+    }
+
+    processed_flow = process_flow(flow_data)
+
+    updated_edge = next(edge for edge in processed_flow["edges"] if edge["target"] == sink_id)
+    assert updated_edge["source"] == loop_id
+    assert updated_edge["data"]["sourceHandle"] == {
+        "dataType": "LoopComponent",
+        "id": loop_id,
+        "name": "done",
+        "output_types": ["DataFrame"],
+    }
+
+
+def test_add_nodes_and_edges_recomputes_grouped_loop_cycles_after_processing(monkeypatch):
+    loop_id = "LoopComponent-loop"
+    converter_id = "TypeConverterComponent-converter"
+    group_id = "groupComponent-loop"
+    sink_id = "ChatOutput-sink"
+    flow_data = {
+        "nodes": [
+            {
+                "id": group_id,
+                "data": {
+                    "id": group_id,
+                    "type": "GroupNode",
+                    "node": {
+                        "template": {},
+                        "outputs": [
+                            {
+                                "name": f"{loop_id}_done",
+                                "proxy": {"id": loop_id, "name": "done", "nodeDisplayName": "Loop"},
+                            }
+                        ],
+                        "flow": {
+                            "data": {
+                                "nodes": [
+                                    {"id": loop_id, "data": {"type": "LoopComponent", "node": {"template": {}}}},
+                                    {
+                                        "id": converter_id,
+                                        "data": {"type": "TypeConverterComponent", "node": {"template": {}}},
+                                    },
+                                ],
+                                "edges": [
+                                    {
+                                        "source": loop_id,
+                                        "target": converter_id,
+                                        "data": {
+                                            "sourceHandle": {"id": loop_id, "name": "item"},
+                                            "targetHandle": {"id": converter_id, "fieldName": "input_data"},
+                                        },
+                                    },
+                                    {
+                                        "source": converter_id,
+                                        "target": loop_id,
+                                        "data": {
+                                            "sourceHandle": {"id": converter_id, "name": "message_output"},
+                                            "targetHandle": {"id": loop_id, "name": "item"},
+                                        },
+                                    },
+                                ],
+                            }
+                        },
+                    },
+                },
+            },
+            {"id": sink_id, "data": {"type": "ChatOutput", "node": {"template": {}}}},
+        ],
+        "edges": [
+            {
+                "source": group_id,
+                "target": sink_id,
+                "data": {
+                    "sourceHandle": {"id": group_id, "name": f"{loop_id}_done"},
+                    "targetHandle": {"id": sink_id, "fieldName": "input_value"},
+                },
+            }
+        ],
+    }
+
+    monkeypatch.setattr(Graph, "initialize", lambda _: None)
+
+    graph = Graph()
+    graph.add_nodes_and_edges(flow_data["nodes"], flow_data["edges"])
+
+    assert graph.cycle_vertices == {loop_id, converter_id}
 
 
 # TODO: Move to Langflow tests

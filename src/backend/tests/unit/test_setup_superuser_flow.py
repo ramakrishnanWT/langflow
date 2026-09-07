@@ -1,10 +1,20 @@
+from datetime import datetime, timezone
+
+import filelock
 import pytest
 from langflow.services.auth.utils import verify_password
 from langflow.services.database.models.user.model import User
-from langflow.services.deps import get_settings_service, session_scope
-from langflow.services.utils import setup_superuser, teardown_superuser
-from lfx.services.settings.constants import DEFAULT_SUPERUSER, DEFAULT_SUPERUSER_PASSWORD
+from langflow.services.deps import get_auth_service, get_settings_service, session_scope
+from langflow.services.utils import SetupSuperuserResult, setup_superuser, teardown_superuser
+from lfx.services.settings.constants import (
+    DEFAULT_SUPERUSER,
+    DEFAULT_SUPERUSER_PASSWORD,
+    LEGACY_DEFAULT_SUPERUSER_PASSWORD,
+)
+from pydantic import SecretStr
 from sqlmodel import select
+
+_MOCK_AUTO_LOGIN_LOCK_TIMEOUT_MSG = "mock lock timeout"
 
 
 @pytest.fixture
@@ -21,6 +31,8 @@ async def initialized_services(monkeypatch, tmp_path):
     db_path = tmp_path / "test.db"
     monkeypatch.setenv("LANGFLOW_DATABASE_URL", f"sqlite:///{db_path}")
     monkeypatch.setenv("LANGFLOW_AUTO_LOGIN", "false")
+    monkeypatch.setenv("LANGFLOW_SUPERUSER", DEFAULT_SUPERUSER)
+    monkeypatch.setenv("LANGFLOW_SUPERUSER_PASSWORD", "test-superuser-password")
 
     get_service_manager().factories.clear()
     get_service_manager().services.clear()
@@ -40,18 +52,127 @@ async def test_initialize_services_creates_default_superuser_when_auto_login_tru
     settings.auth_settings.AUTO_LOGIN = True
 
     async with session_scope() as session:
-        await setup_superuser(settings, session)
+        result = await setup_superuser(settings, session)
+        assert result in (
+            SetupSuperuserResult.AUTO_LOGIN_INITIALIZED,
+            SetupSuperuserResult.AUTO_LOGIN_ALREADY_SATISFIED,
+        )
 
     async with session_scope() as session:
         stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
         user = (await session.exec(stmt)).first()
         assert user is not None
         assert user.is_superuser is True
+        assert verify_password("test-superuser-password", user.password) is True
+        assert verify_password(LEGACY_DEFAULT_SUPERUSER_PASSWORD.get_secret_value(), user.password) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_auto_login_rotates_legacy_default_password(initialized_services):  # noqa: ARG001
+    """AUTO_LOGIN startup rotates old langflow/langflow hashes left by previous releases."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = True
+    settings.auth_settings.SUPERUSER = DEFAULT_SUPERUSER
+    settings.auth_settings.SUPERUSER_PASSWORD = DEFAULT_SUPERUSER_PASSWORD
+    legacy_password = LEGACY_DEFAULT_SUPERUSER_PASSWORD.get_secret_value()
+
+    async with session_scope() as session:
+        stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
+        user = (await session.exec(stmt)).first()
+        if user is None:
+            user = User(
+                username=DEFAULT_SUPERUSER,
+                password=get_auth_service().get_password_hash(legacy_password),
+                is_superuser=True,
+                is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+        else:
+            user.password = get_auth_service().get_password_hash(legacy_password)
+        user.is_superuser = True
+        await session.commit()
+
+    async with session_scope() as session:
+        result = await setup_superuser(settings, session)
+        assert result == SetupSuperuserResult.AUTO_LOGIN_ALREADY_SATISFIED
+
+    async with session_scope() as session:
+        user = (await session.exec(select(User).where(User.username == DEFAULT_SUPERUSER))).first()
+        assert user is not None
+        assert verify_password(legacy_password, user.password) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_rotates_legacy_default_password_when_auto_login_false(
+    initialized_services,  # noqa: ARG001
+):
+    """Authenticated startup rotates old langflow/langflow hashes to the configured password."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = False
+    settings.auth_settings.SUPERUSER = DEFAULT_SUPERUSER
+    settings.auth_settings.SUPERUSER_PASSWORD = SecretStr("rotated-production-password")
+    legacy_password = LEGACY_DEFAULT_SUPERUSER_PASSWORD.get_secret_value()
+
+    async with session_scope() as session:
+        stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
+        user = (await session.exec(stmt)).first()
+        if user is None:
+            user = User(
+                username=DEFAULT_SUPERUSER,
+                password=get_auth_service().get_password_hash(legacy_password),
+                is_superuser=True,
+                is_active=True,
+            )
+            session.add(user)
+            await session.flush()
+        user.password = get_auth_service().get_password_hash(legacy_password)
+        user.is_superuser = True
+        user.is_active = True
+        user.last_login_at = datetime.now(timezone.utc)
+        await session.commit()
+
+    async with session_scope() as session:
+        result = await setup_superuser(settings, session)
+        assert result == SetupSuperuserResult.SUPERUSER_UNCHANGED
+
+    async with session_scope() as session:
+        user = (await session.exec(select(User).where(User.username == DEFAULT_SUPERUSER))).first()
+        assert user is not None
+        assert verify_password("rotated-production-password", user.password) is True
+        assert verify_password(legacy_password, user.password) is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_auto_login_fails_when_username_is_not_superuser(initialized_services):  # noqa: ARG001
+    """AUTO_LOGIN setup must not accept an existing non-superuser bootstrap username."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = True
+    settings.auth_settings.SUPERUSER = "regular-user"
+    settings.auth_settings.SUPERUSER_PASSWORD = DEFAULT_SUPERUSER_PASSWORD
+
+    async with session_scope() as session:
+        user = User(
+            username="regular-user",
+            password=get_auth_service().get_password_hash("regular-password"),
+            is_superuser=False,
+            is_active=True,
+        )
+        session.add(user)
+        await session.commit()
+
+    async with session_scope() as session:
+        with pytest.raises(RuntimeError, match="not a superuser"):
+            await setup_superuser(settings, session)
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 async def test_teardown_superuser_removes_default_if_never_logged(initialized_services):  # noqa: ARG001
+    """AUTO_LOGIN=False removes the default superuser when they have never signed in."""
     settings = get_settings_service()
     settings.auth_settings.AUTO_LOGIN = False
 
@@ -63,26 +184,23 @@ async def test_teardown_superuser_removes_default_if_never_logged(initialized_se
         if not user:
             user = User(
                 username=DEFAULT_SUPERUSER,
-                password=DEFAULT_SUPERUSER_PASSWORD.get_secret_value(),
+                password=get_auth_service().get_password_hash("test-superuser-password"),
                 is_superuser=True,
                 is_active=True,
             )
             session.add(user)
             await session.commit()
             await session.refresh(user)
-        # Ensure the user is treated as "never logged in" so teardown removes it
         user.last_login_at = None
         user.is_superuser = True
         await session.commit()
 
-    # Run teardown and verify removal
     async with session_scope() as session:
         await teardown_superuser(settings, session)
 
     async with session_scope() as session:
         stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
-        user = (await session.exec(stmt)).first()
-        assert user is None
+        assert (await session.exec(stmt)).first() is None
 
 
 @pytest.mark.asyncio
@@ -101,7 +219,7 @@ async def test_teardown_superuser_preserves_logged_in_default(initialized_servic
         if not user:
             user = User(
                 username=DEFAULT_SUPERUSER,
-                password=DEFAULT_SUPERUSER_PASSWORD.get_secret_value(),
+                password=get_auth_service().get_password_hash("test-superuser-password"),
                 is_superuser=True,
                 is_active=True,
             )
@@ -127,8 +245,8 @@ async def test_teardown_superuser_preserves_logged_in_default(initialized_servic
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
-async def test_setup_superuser_with_no_configured_credentials(initialized_services):  # noqa: ARG001
-    """Test setup_superuser behavior when no superuser credentials are configured."""
+async def test_setup_superuser_with_no_configured_credentials_fails_closed(initialized_services):  # noqa: ARG001
+    """AUTO_LOGIN=False must not create a superuser from predictable fallback credentials."""
     settings = get_settings_service()
     settings.auth_settings.AUTO_LOGIN = False
     settings.auth_settings.SUPERUSER = ""
@@ -136,22 +254,66 @@ async def test_setup_superuser_with_no_configured_credentials(initialized_servic
     settings.auth_settings.SUPERUSER_PASSWORD = ""
 
     async with session_scope() as session:
-        # This should create a default superuser since no credentials are provided
-        await setup_superuser(settings, session)
+        with pytest.raises(ValueError, match="Username and password must be set"):
+            await setup_superuser(settings, session)
 
-        # Verify default superuser was created
-        stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
-        user = (await session.exec(stmt)).first()
+
+@pytest.mark.parametrize("username", [DEFAULT_SUPERUSER, "custom_admin"])
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_rejects_legacy_default_password_when_auto_login_false(
+    initialized_services,  # noqa: ARG001
+    username,
+):
+    """Authenticated startup must not create a superuser with the legacy default password."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = False
+    settings.auth_settings.SUPERUSER = username
+    settings.auth_settings.SUPERUSER_PASSWORD = LEGACY_DEFAULT_SUPERUSER_PASSWORD
+
+    async with session_scope() as session:
+        with pytest.raises(ValueError, match="legacy default password"):
+            await setup_superuser(settings, session)
+
+    async with session_scope() as session:
+        user = (await session.exec(select(User).where(User.username == username))).first()
+        assert user is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_auto_login_ignores_configured_legacy_default_password(
+    initialized_services,  # noqa: ARG001
+):
+    """AUTO_LOGIN startup must not persist langflow/langflow even when env config provides it."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = True
+    settings.auth_settings.SUPERUSER = DEFAULT_SUPERUSER
+    settings.auth_settings.SUPERUSER_PASSWORD = LEGACY_DEFAULT_SUPERUSER_PASSWORD
+    legacy_password = LEGACY_DEFAULT_SUPERUSER_PASSWORD.get_secret_value()
+
+    async with session_scope() as session:
+        user = (await session.exec(select(User).where(User.username == DEFAULT_SUPERUSER))).first()
+        assert user is not None
+        user.password = get_auth_service().get_password_hash(legacy_password)
+        user.is_superuser = True
+        user.is_active = True
+        await session.commit()
+
+    async with session_scope() as session:
+        assert await setup_superuser(settings, session) == SetupSuperuserResult.AUTO_LOGIN_ALREADY_SATISFIED
+
+    async with session_scope() as session:
+        user = (await session.exec(select(User).where(User.username == DEFAULT_SUPERUSER))).first()
         assert user is not None
         assert user.is_superuser is True
+        assert verify_password(legacy_password, user.password) is False
 
 
 @pytest.mark.asyncio
 @pytest.mark.timeout(30)
 async def test_setup_superuser_with_custom_credentials(initialized_services):  # noqa: ARG001
     """Test setup_superuser behavior with custom superuser credentials."""
-    from pydantic import SecretStr
-
     settings = get_settings_service()
     settings.auth_settings.AUTO_LOGIN = False
     settings.auth_settings.SUPERUSER = "custom_admin"
@@ -175,7 +337,7 @@ async def test_setup_superuser_with_custom_credentials(initialized_services):  #
             await session.commit()
 
     async with session_scope() as session:
-        await setup_superuser(settings, session)
+        assert await setup_superuser(settings, session) == SetupSuperuserResult.SUPERUSER_CREATED
 
         # Verify custom superuser was created
         stmt = select(User).where(User.username == "custom_admin")
@@ -201,3 +363,80 @@ async def test_setup_superuser_with_custom_credentials(initialized_services):  #
         if created_custom:
             await session.delete(created_custom)
             await session.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_auto_login_lock_timeout_raises_when_no_superuser(initialized_services, monkeypatch):  # noqa: ARG001
+    """If the AUTO_LOGIN lock times out and no default superuser exists, startup must fail loudly."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = True
+
+    # The fixture initializes services with AUTO_LOGIN=false, which creates the default
+    # superuser via the credentials-fallback path. Remove it so we exercise the
+    # "lock timed out and no superuser exists" branch.
+    async with session_scope() as session:
+        stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
+        user = (await session.exec(stmt)).first()
+        if user is not None:
+            await session.delete(user)
+            await session.commit()
+
+    class _FailingLock:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            msg = _MOCK_AUTO_LOGIN_LOCK_TIMEOUT_MSG
+            raise TimeoutError(msg)
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(filelock, "FileLock", _FailingLock)
+
+    async with session_scope() as session:
+        with pytest.raises(
+            RuntimeError,
+            match="AUTO_LOGIN is enabled but the default superuser was not initialized",
+        ):
+            await setup_superuser(settings, session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.timeout(30)
+async def test_setup_superuser_auto_login_lock_timeout_ok_when_superuser_exists(initialized_services, monkeypatch):  # noqa: ARG001
+    """If the lock times out but the default superuser already exists, setup continues without error."""
+    settings = get_settings_service()
+    settings.auth_settings.AUTO_LOGIN = True
+
+    async with session_scope() as session:
+        await get_auth_service().create_super_user(
+            DEFAULT_SUPERUSER,
+            "test-superuser-password",
+            db=session,
+        )
+
+    class _FailingLock:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            msg = _MOCK_AUTO_LOGIN_LOCK_TIMEOUT_MSG
+            raise TimeoutError(msg)
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(filelock, "FileLock", _FailingLock)
+
+    async with session_scope() as session:
+        assert (
+            await setup_superuser(settings, session) == SetupSuperuserResult.AUTO_LOGIN_LOCK_TIMEOUT_SUPERUSER_PRESENT
+        )
+
+    async with session_scope() as session:
+        stmt = select(User).where(User.username == DEFAULT_SUPERUSER)
+        user = (await session.exec(stmt)).first()
+        assert user is not None
+        assert user.is_superuser is True

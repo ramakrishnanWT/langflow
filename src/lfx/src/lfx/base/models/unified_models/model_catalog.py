@@ -5,16 +5,18 @@ from __future__ import annotations
 import contextlib
 from typing import TYPE_CHECKING, Any
 
-from lfx.base.models.model_metadata import get_provider_param_mapping
-from lfx.base.models.model_utils import replace_with_live_models
+from lfx.base.models.model_metadata import EXPLICIT_ENABLE_ONLY_PROVIDERS, get_provider_param_mapping
+from lfx.base.models.model_utils import apply_metadata_filters, inject_custom_enabled_models, replace_with_live_models
 from lfx.utils.async_helpers import run_until_complete
 
-from .class_registry import EMBEDDING_PROVIDER_CLASS_MAPPING
-from .credentials import _fetch_enabled_providers_for_user, _get_model_status
-from .provider_queries import MODELS_DETAILED, model_provider_metadata
+from .class_registry import EMBEDDING_PARAM_MAPPINGS, EMBEDDING_PROVIDER_CLASS_MAPPING
+from .credentials import _fetch_enabled_providers_for_user, _get_model_status, model_status_contains
+from .provider_queries import get_model_providers, get_models_detailed, model_provider_metadata
 
 if TYPE_CHECKING:
     from uuid import UUID
+
+    from lfx.services.model_provider_policy import ModelProviderPolicySnapshot
 
 
 def get_unified_models_detailed(
@@ -56,9 +58,10 @@ def get_unified_models_detailed(
     if include_deprecated is None:
         include_deprecated = False
 
-    # Gather all models from imported *_MODELS_DETAILED lists
+    # Gather all models from the active catalog (static lists + any
+    # models.dev override that may have been installed at startup).
     all_models: list[dict] = []
-    for models_detailed in MODELS_DETAILED:
+    for models_detailed in get_models_detailed():
         all_models.extend(models_detailed)
 
     # Apply filters
@@ -95,16 +98,31 @@ def get_unified_models_detailed(
             }
         )
 
-    # Mark the first 5 models in each provider as default (based on list order)
-    # and optionally filter to only defaults
+    # Sort each provider's list so the picker presents newest-supported first,
+    # deprecated drops to the bottom, and providers with no date data preserve
+    # their hand-curated constants-file order (stable sort + tuple ties).
+    #
+    # Sort key: (is_deprecated, -created_epoch). When ``created`` is unknown
+    # (== 0) every row in the same deprecation tier ties on the second
+    # component, so list.sort's stable behavior keeps the original order
+    # intact. Defaults are stamped AFTER sorting so the first-N selection
+    # reflects the new ordering instead of the raw constants order.
     default_model_count = 5  # Number of default models per provider
 
+    def _sort_key(model: dict) -> tuple[int, int]:
+        meta = model.get("metadata", {})
+        is_deprecated = 1 if meta.get("deprecated") else 0
+        created = meta.get("created") or 0
+        try:
+            created_int = int(created)
+        except (TypeError, ValueError):
+            created_int = 0
+        return (is_deprecated, -created_int)
+
     for prov, models in provider_map.items():
+        models.sort(key=_sort_key)
         for i, model in enumerate(models):
-            if i < default_model_count:
-                model["metadata"]["default"] = True
-            else:
-                model["metadata"]["default"] = False
+            model["metadata"]["default"] = i < default_model_count
 
         # If only_defaults is True, filter to only default models
         if only_defaults:
@@ -113,34 +131,51 @@ def get_unified_models_detailed(
     # Format as requested
     return [
         {
+            **model_provider_metadata.get(prov, {}),
             "provider": prov,
             "models": models,
             "num_models": len(models),
-            **model_provider_metadata.get(prov, {}),
         }
         for prov, models in provider_map.items()
     ]
 
 
 def get_language_model_options(
-    user_id: UUID | str | None = None, *, tool_calling: bool | None = None
+    user_id: UUID | str | None = None,
+    *,
+    tool_calling: bool | None = None,
+    filters: dict[str, Any] | None = None,
+    provider_policy: ModelProviderPolicySnapshot | None = None,
 ) -> list[dict[str, Any]]:
-    """Return available language model providers with their configuration."""
+    """Return available language model providers with their configuration.
+
+    ``filters`` is a dict of metadata key/value constraints forwarded to
+    ``get_unified_models_detailed`` (e.g. ``{"tool_calling": True}``,
+    ``{"reasoning": True}``). It is the declarative path used by
+    ``ModelInput(filters=...)``. The legacy ``tool_calling`` kwarg is kept
+    for back-compat and merged into ``filters`` when present.
+    """
     # Get all LLM models (excluding embeddings, deprecated, and unsupported by default)
-    # Apply tool_calling filter if specified
+    metadata_filters: dict[str, Any] = dict(filters or {})
     if tool_calling is not None:
-        all_models = get_unified_models_detailed(
-            model_type="llm",
-            include_deprecated=False,
-            include_unsupported=False,
-            tool_calling=tool_calling,
+        metadata_filters.setdefault("tool_calling", tool_calling)
+
+    all_models = get_unified_models_detailed(
+        model_type="llm",
+        include_deprecated=False,
+        include_unsupported=False,
+        **metadata_filters,
+    )
+
+    if provider_policy is None:
+        from lfx.services.model_provider_policy import ModelProviderPolicyPurpose, resolve_model_provider_policy
+
+        provider_policy = resolve_model_provider_policy(
+            user_id=user_id,
+            providers=get_model_providers(),
+            purpose=ModelProviderPolicyPurpose.USE,
         )
-    else:
-        all_models = get_unified_models_detailed(
-            model_type="llm",
-            include_deprecated=False,
-            include_unsupported=False,
-        )
+    all_models = [provider_data for provider_data in all_models if provider_policy.allows(provider_data["provider"])]
 
     # Get disabled and explicitly enabled models for this user if user_id is provided
     disabled_models: set[str] = set()
@@ -153,11 +188,26 @@ def get_language_model_options(
     enabled_providers = set()
     if user_id:
         with contextlib.suppress(Exception):
-            enabled_providers = run_until_complete(_fetch_enabled_providers_for_user(user_id))
+            enabled_providers = run_until_complete(
+                _fetch_enabled_providers_for_user(user_id, provider_policy=provider_policy)
+            )
+    enabled_providers = {provider for provider in enabled_providers if provider_policy.allows(provider)}
 
     # Replace static defaults with actual available models from configured instances
+    suppressed: dict[str, set[tuple[str, str]]] = {}
     if enabled_providers:
         replace_with_live_models(all_models, user_id, enabled_providers, "llm", model_provider_metadata)
+        # Live rows replace the statically filtered catalog wholesale — re-apply the
+        # metadata filters so e.g. the Agent picker can't see no-tool live models.
+        suppressed = apply_metadata_filters(all_models, metadata_filters)
+    inject_custom_enabled_models(
+        all_models,
+        explicitly_enabled_models,
+        model_type="llm",
+        metadata_filters=metadata_filters or None,
+        suppressed=suppressed or None,
+    )
+    all_models = [provider_data for provider_data in all_models if provider_policy.allows(provider_data["provider"])]
 
     options = []
 
@@ -186,14 +236,27 @@ def get_language_model_options(
             model_name = model_data.get("model_name")
             metadata = model_data.get("metadata", {})
             is_default = metadata.get("default", False)
+            row_model_type = metadata.get("model_type") or "llm"
 
-            # Determine if model should be shown:
-            # - If not default and not explicitly enabled, skip it
-            # - If in disabled list, skip it
-            # - Otherwise, show it
-            if not is_default and model_name not in explicitly_enabled_models:
+            # Foundry: only user-enabled deployment names; else defaults or explicit enables.
+            if provider in EXPLICIT_ENABLE_ONLY_PROVIDERS:
+                if not model_status_contains(
+                    explicitly_enabled_models,
+                    provider,
+                    model_name,
+                    model_type=row_model_type,
+                ):
+                    continue
+            elif not is_default and not model_status_contains(
+                explicitly_enabled_models,
+                provider,
+                model_name,
+                model_type=row_model_type,
+            ):
                 continue
-            if model_name in disabled_models:
+            if model_status_contains(disabled_models, provider, model_name, model_type=row_model_type):
+                continue
+            if not provider_policy.allows_model(provider, model_name, model_type=row_model_type):
                 continue
 
             # Get parameter mapping for this provider
@@ -219,11 +282,12 @@ def get_language_model_options(
                 "metadata": option_metadata,
             }
 
-            # Add reasoning models list for OpenAI
-            if provider == "OpenAI" and metadata.get("reasoning"):
-                if "reasoning_models" not in option["metadata"]:
-                    option["metadata"]["reasoning_models"] = []
-                option["metadata"]["reasoning_models"].append(model_name)
+            # Propagate catalog ``reasoning`` for every provider (not just
+            # OpenAI) so get_llm can suppress unsupported sampling parameters
+            # consistently while preserving independently supported token caps.
+            if metadata.get("reasoning"):
+                option["metadata"]["reasoning"] = True
+                option["metadata"]["reasoning_models"] = [model_name]
 
             # Add provider-specific params from mapping
             if "base_url_param" in param_mapping:
@@ -240,6 +304,8 @@ def get_language_model_options(
 
 def get_embedding_model_options(
     user_id: UUID | str | None = None,
+    *,
+    provider_policy: ModelProviderPolicySnapshot | None = None,
 ) -> list[dict[str, Any]]:
     """Return available embedding model providers with their configuration."""
     # Get all embedding models (excluding deprecated and unsupported by default)
@@ -248,6 +314,16 @@ def get_embedding_model_options(
         include_deprecated=False,
         include_unsupported=False,
     )
+
+    if provider_policy is None:
+        from lfx.services.model_provider_policy import ModelProviderPolicyPurpose, resolve_model_provider_policy
+
+        provider_policy = resolve_model_provider_policy(
+            user_id=user_id,
+            providers=get_model_providers(),
+            purpose=ModelProviderPolicyPurpose.USE,
+        )
+    all_models = [provider_data for provider_data in all_models if provider_policy.allows(provider_data["provider"])]
 
     # Get disabled and explicitly enabled models for this user if user_id is provided
     disabled_models: set[str] = set()
@@ -260,7 +336,10 @@ def get_embedding_model_options(
     enabled_providers = set()
     if user_id:
         with contextlib.suppress(Exception):
-            enabled_providers = run_until_complete(_fetch_enabled_providers_for_user(user_id))
+            enabled_providers = run_until_complete(
+                _fetch_enabled_providers_for_user(user_id, provider_policy=provider_policy)
+            )
+    enabled_providers = {provider for provider in enabled_providers if provider_policy.allows(provider)}
 
     # Replace static defaults with actual available models from configured instances
     if enabled_providers:
@@ -271,45 +350,15 @@ def get_embedding_model_options(
             "embeddings",
             model_provider_metadata,
         )
+    inject_custom_enabled_models(all_models, explicitly_enabled_models, model_type="embeddings")
+    all_models = [provider_data for provider_data in all_models if provider_policy.allows(provider_data["provider"])]
 
     options = []
 
-    # Provider-specific param mappings
-    param_mappings = {
-        "OpenAI": {
-            "model": "model",
-            "api_key": "api_key",
-            "api_base": "base_url",
-            "dimensions": "dimensions",
-            "chunk_size": "chunk_size",
-            "request_timeout": "timeout",
-            "max_retries": "max_retries",
-            "show_progress_bar": "show_progress_bar",
-            "model_kwargs": "model_kwargs",
-        },
-        "Google Generative AI": {
-            "model": "model",
-            "api_key": "google_api_key",
-            "dimensions": "output_dimensionality",
-            "request_timeout": "request_options",
-            "model_kwargs": "client_options",
-        },
-        "Ollama": {
-            "model": "model",
-            "base_url": "base_url",
-            "num_ctx": "num_ctx",
-            "request_timeout": "request_timeout",
-            "model_kwargs": "model_kwargs",
-        },
-        "IBM WatsonX": {
-            "model_id": "model_id",
-            "url": "url",
-            "api_key": "apikey",
-            "project_id": "project_id",
-            "space_id": "space_id",
-            "request_timeout": "request_timeout",
-        },
-    }
+    # Provider-specific param mappings live in class_registry alongside
+    # the embedding-class mapping so the instantiation fallback in
+    # ``_instantiate_embeddings`` shares one source of truth.
+    param_mappings = EMBEDDING_PARAM_MAPPINGS
 
     # Track which providers have models
     providers_with_models = set()
@@ -337,14 +386,27 @@ def get_embedding_model_options(
             model_name = model_data.get("model_name")
             metadata = model_data.get("metadata", {})
             is_default = metadata.get("default", False)
+            row_model_type = metadata.get("model_type") or "embeddings"
 
-            # Determine if model should be shown:
-            # - If not default and not explicitly enabled, skip it
-            # - If in disabled list, skip it
-            # - Otherwise, show it
-            if not is_default and model_name not in explicitly_enabled_models:
+            # Foundry: require explicit enable; else defaults or explicit enables.
+            if provider in EXPLICIT_ENABLE_ONLY_PROVIDERS:
+                if not model_status_contains(
+                    explicitly_enabled_models,
+                    provider,
+                    model_name,
+                    model_type=row_model_type,
+                ):
+                    continue
+            elif not is_default and not model_status_contains(
+                explicitly_enabled_models,
+                provider,
+                model_name,
+                model_type=row_model_type,
+            ):
                 continue
-            if model_name in disabled_models:
+            if model_status_contains(disabled_models, provider, model_name, model_type=row_model_type):
+                continue
+            if not provider_policy.allows_model(provider, model_name, model_type=row_model_type):
                 continue
 
             # Build the option dict
@@ -405,8 +467,7 @@ def normalize_model_names_to_dicts(
             if "max_tokens_field_name" in provider_meta:
                 runtime_metadata["max_tokens_field_name"] = provider_meta["max_tokens_field_name"]
 
-            # Add reasoning models list for OpenAI
-            if provider == "OpenAI" and base_metadata.get("reasoning"):
+            if base_metadata.get("reasoning"):
                 runtime_metadata["reasoning_models"] = [model_name]
 
             # Add provider-specific params from mapping
@@ -420,13 +481,18 @@ def normalize_model_names_to_dicts(
             # Merge base metadata with runtime metadata
             full_metadata = {**base_metadata, **runtime_metadata}
 
-            model_lookup[model_name] = {
-                "name": model_name,
-                "icon": icon,
-                "category": provider,
-                "provider": provider,
-                "metadata": full_metadata,
-            }
+            # Catalog order is the backwards-compatibility precedence for bare
+            # model names. Keep the first provider when aliases overlap.
+            model_lookup.setdefault(
+                model_name,
+                {
+                    "name": model_name,
+                    "icon": icon,
+                    "category": provider,
+                    "provider": provider,
+                    "metadata": full_metadata,
+                },
+            )
 
     # Convert string list to dict list
     result = []

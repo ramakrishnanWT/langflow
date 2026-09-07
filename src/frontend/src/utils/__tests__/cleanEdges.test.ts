@@ -17,7 +17,7 @@ const scapeJSONParse = (str: string) => {
   }
 };
 
-const customStringify = (obj: any): string => {
+const customStringify = (obj: unknown): string => {
   if (typeof obj === "undefined") return "null";
   if (obj === null || typeof obj !== "object") {
     if (obj instanceof Date) return `"${obj.toISOString()}"`;
@@ -27,9 +27,10 @@ const customStringify = (obj: any): string => {
     const arrayItems = obj.map((item) => customStringify(item)).join(",");
     return `[${arrayItems}]`;
   }
-  const keys = Object.keys(obj).sort();
+  const record = obj as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
   const keyValuePairs = keys.map(
-    (key) => `"${key}":${customStringify(obj[key])}`,
+    (key) => `"${key}":${customStringify(record[key])}`,
   );
   return `{${keyValuePairs.join(",")}}`;
 };
@@ -263,7 +264,9 @@ function cleanEdges(nodes: AllNodeType[], edges: EdgeType[]) {
                 ?.length ?? 0) <= 1) &&
             o.name === name,
         );
-        const output = outputBySelectedOutput ?? outputByFallback;
+        // Prefer the stored edge name; only fall back to selected_output when
+        // the stored name no longer matches any visible output.
+        const output = outputByFallback ?? outputBySelectedOutput;
 
         if (output) {
           const outputTypes =
@@ -515,8 +518,8 @@ describe("cleanEdges", () => {
       expect(result3.brokenEdges.length).toBe(1);
     });
 
-    it("should preserve edge when EmbeddingModel has empty input_types and edge expects Embeddings (LE-278)", () => {
-      // This tests the fix for embedding model input type (LE-278)
+    it("should preserve edge when EmbeddingModel has empty input_types and edge expects Embeddings", () => {
+      // This tests the fix for embedding model input type
       const sourceNode: AllNodeType = {
         id: "EmbeddingModelComponent-123",
         type: "genericNode",
@@ -675,6 +678,170 @@ describe("cleanEdges", () => {
     });
   });
 
+  describe("mode-based component edge preservation", () => {
+    it("preserves Knowledge → Parser edge when selected_output points at the other mode output", () => {
+      // Regression test for the Knowledge starter project bug: the Knowledge
+      // component keeps BOTH outputs at the class level (dataframe_output for
+      // Ingest mode, retrieve_data for Retrieve mode). When selected_output is
+      // mis-set to "dataframe_output" but the stored edge name is "retrieve_data",
+      // cleanEdges must NOT rewrite the edge to point at the wrong handle.
+      const sourceNode: AllNodeType = {
+        id: "Knowledge-x0bZd",
+        type: "genericNode",
+        data: {
+          id: "Knowledge-x0bZd",
+          type: "Knowledge",
+          // selected_output mis-set to the FIRST listed output (the bug scenario).
+          selected_output: "dataframe_output",
+          node: {
+            display_name: "Knowledge",
+            template: {},
+            outputs: [
+              {
+                name: "dataframe_output",
+                display_name: "Results",
+                types: ["JSON"],
+                selected: "JSON",
+              },
+              {
+                name: "retrieve_data",
+                display_name: "Results",
+                types: ["Table"],
+                selected: "Table",
+              },
+            ],
+          },
+        },
+      };
+
+      const targetNode: AllNodeType = {
+        id: "parser-1",
+        type: "genericNode",
+        data: {
+          id: "parser-1",
+          type: "parser",
+          node: {
+            display_name: "Parser",
+            template: {
+              input_data: {
+                type: "other",
+                input_types: ["DataFrame", "Table", "Data", "JSON"],
+              },
+            },
+            outputs: [],
+          },
+        },
+      };
+
+      const sourceHandleStr = scapedJSONStringfy({
+        dataType: "Knowledge",
+        id: "Knowledge-x0bZd",
+        name: "retrieve_data",
+        output_types: ["Table"],
+      });
+
+      const targetHandleStr = scapedJSONStringfy({
+        fieldName: "input_data",
+        id: "parser-1",
+        inputTypes: ["DataFrame", "Table", "Data", "JSON"],
+        type: "other",
+      });
+
+      const edge: EdgeType = {
+        id: "edge-knowledge-parser",
+        source: "Knowledge-x0bZd",
+        target: "parser-1",
+        sourceHandle: sourceHandleStr,
+        targetHandle: targetHandleStr,
+      };
+
+      const result = cleanEdges([sourceNode, targetNode], [edge]);
+
+      // Edge MUST be preserved: stored name "retrieve_data" still matches a
+      // visible output, so outputByFallback wins over the stale selected_output.
+      expect(result.edges.length).toBe(1);
+      expect(result.brokenEdges.length).toBe(0);
+    });
+
+    it("falls back to selected_output when stored handle name is no longer present", () => {
+      // When a component's output list has changed (e.g. a renamed output) and
+      // the stored edge name no longer matches any visible output, cleanEdges
+      // should still attempt to use selected_output as a last resort rather
+      // than silently dropping the edge.
+      const sourceNode: AllNodeType = {
+        id: "LegacyComponent-1",
+        type: "genericNode",
+        data: {
+          id: "LegacyComponent-1",
+          type: "LegacyComponent",
+          selected_output: "new_output_name",
+          node: {
+            display_name: "Legacy Component",
+            template: {},
+            outputs: [
+              {
+                name: "new_output_name",
+                display_name: "Output",
+                types: ["Message"],
+                selected: "Message",
+              },
+            ],
+          },
+        },
+      };
+
+      const targetNode: AllNodeType = {
+        id: "ChatOutput-1",
+        type: "genericNode",
+        data: {
+          id: "ChatOutput-1",
+          type: "ChatOutput",
+          node: {
+            display_name: "Chat Output",
+            template: {
+              input_value: {
+                type: "str",
+                input_types: ["Message"],
+              },
+            },
+            outputs: [],
+          },
+        },
+      };
+
+      const sourceHandleStr = scapedJSONStringfy({
+        dataType: "LegacyComponent",
+        id: "LegacyComponent-1",
+        name: "old_output_name",
+        output_types: ["Message"],
+      });
+
+      const targetHandleStr = scapedJSONStringfy({
+        fieldName: "input_value",
+        id: "ChatOutput-1",
+        inputTypes: ["Message"],
+        type: "str",
+      });
+
+      const edge: EdgeType = {
+        id: "edge-legacy-chatoutput",
+        source: "LegacyComponent-1",
+        target: "ChatOutput-1",
+        sourceHandle: sourceHandleStr,
+        targetHandle: targetHandleStr,
+      };
+
+      const result = cleanEdges([sourceNode, targetNode], [edge]);
+
+      // outputByFallback returns undefined (stored name "old_output_name" is
+      // gone). outputBySelectedOutput finds "new_output_name". The
+      // reconstructed handle differs from the stored one, so the edge is
+      // dropped to brokenEdges rather than left in a broken state.
+      expect(result.edges.length).toBe(0);
+      expect(result.brokenEdges.length).toBe(1);
+    });
+  });
+
   describe("Basic edge validation", () => {
     it("should remove edge when source node does not exist", () => {
       const targetNodeBasic: AllNodeType = {
@@ -732,6 +899,120 @@ describe("cleanEdges", () => {
       const resultBasic2 = cleanEdges([sourceNodeBasic], [edgeBasic2]);
 
       expect(resultBasic2.edges.length).toBe(0);
+    });
+  });
+
+  describe("dropdown-output loop feedback edge (TypeConverter)", () => {
+    // The loop body converts each item back to Data via TypeConverter, whose
+    // JSON output (`data_output`) feeds back into `Loop.item`. TypeConverter is
+    // a single-active dropdown with three outputs; if the canvas auto-selects
+    // its first output (`message_output`) the feedback edge is cleaned away.
+    const TC_ID = "TypeConverterComponent-1";
+    const LOOP_ID = "LoopComponent-1";
+
+    const loopNode: AllNodeType = {
+      id: LOOP_ID,
+      type: "genericNode",
+      data: {
+        id: LOOP_ID,
+        type: "LoopComponent",
+        node: {
+          display_name: "Loop",
+          template: { data: { type: "other", input_types: ["Data"] } },
+          outputs: [
+            {
+              name: "item",
+              types: ["Data"],
+              selected: "Data",
+              allows_loop: true,
+              loop_types: ["Message"],
+            },
+            { name: "done", types: ["DataFrame"] },
+          ],
+        },
+      },
+    };
+
+    const feedbackSourceHandle = scapedJSONStringfy({
+      dataType: "TypeConverterComponent",
+      id: TC_ID,
+      name: "data_output",
+      output_types: ["JSON"],
+    });
+    const feedbackTargetHandle = scapedJSONStringfy({
+      dataType: "LoopComponent",
+      id: LOOP_ID,
+      name: "item",
+      output_types: ["Data", "Message"],
+    });
+    const feedbackEdge: EdgeType = {
+      id: "reactflow__edge-feedback",
+      source: TC_ID,
+      target: LOOP_ID,
+      sourceHandle: feedbackSourceHandle,
+      targetHandle: feedbackTargetHandle,
+    };
+
+    const tcOutputs = (selectedForData: boolean): NodeOutput[] => [
+      { name: "message_output", types: ["Message"], selected: "Message" },
+      {
+        name: "data_output",
+        types: ["JSON"],
+        selected: selectedForData ? "JSON" : undefined,
+      },
+      {
+        name: "dataframe_output",
+        types: ["Table"],
+        selected: selectedForData ? "Table" : undefined,
+      },
+    ];
+
+    it("keeps the feedback edge when the built node pins selected_output to data_output", () => {
+      // The backend flow_builder fix stamps selected_output on the wired output,
+      // so the canvas never auto-flips and cleanEdges resolves data_output.
+      const tcNode: AllNodeType = {
+        id: TC_ID,
+        type: "genericNode",
+        data: {
+          id: TC_ID,
+          type: "TypeConverterComponent",
+          selected_output: "data_output",
+          node: {
+            display_name: "Type Convert",
+            template: {},
+            outputs: tcOutputs(true),
+          },
+        },
+      };
+
+      const result = cleanEdges([tcNode, loopNode], [feedbackEdge]);
+      expect(result.edges.map((e) => e.id)).toContain(
+        "reactflow__edge-feedback",
+      );
+    });
+
+    it("drops the feedback edge once the node has auto-flipped to message_output", () => {
+      // Reproduces the pre-fix state: no selected_output pin, so the canvas
+      // auto-selected the first output and cleared data_output's `selected`.
+      const flippedNode: AllNodeType = {
+        id: TC_ID,
+        type: "genericNode",
+        data: {
+          id: TC_ID,
+          type: "TypeConverterComponent",
+          selected_output: "message_output",
+          node: {
+            display_name: "Type Convert",
+            template: {},
+            outputs: tcOutputs(false),
+          },
+        },
+      };
+
+      const result = cleanEdges([flippedNode, loopNode], [feedbackEdge]);
+      expect(result.edges.map((e) => e.id)).not.toContain(
+        "reactflow__edge-feedback",
+      );
     });
   });
 });

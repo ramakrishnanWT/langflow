@@ -2,7 +2,7 @@
 title: Users endpoints
 slug: /api-users
 ---
-import CodeSnippet from '@site/src/components/CodeSnippet';
+import CodeBlock from '@theme/CodeBlock';
 import exampleApiUsersAddUser from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/add-user.sh';
 import resultApiUsersResultAddUser from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/result-add-user.json';
 import exampleApiUsersGetCurrentUser from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/get-current-user.sh';
@@ -11,6 +11,7 @@ import exampleApiUsersListAllUsers from '!!raw-loader!@site/docs/API-Reference/c
 import resultApiUsersResultListAllUsers from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/result-list-all-users.json';
 import exampleApiUsersUpdateUser from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/update-user.sh';
 import resultApiUsersResultUpdateUser from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/result-update-user.json';
+import exampleApiUsersSetUserPassword from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/set-user-password.sh';
 import exampleApiUsersResetPassword from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/reset-password.sh';
 import resultApiUsersResultResetPassword from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/result-reset-password.json';
 import exampleApiUsersDeleteUser from '!!raw-loader!@site/docs/API-Reference/curl-examples/api-users/delete-user.sh';
@@ -25,6 +26,8 @@ import examplePythonApiUsersListAllUsers from '!!raw-loader!@site/docs/API-Refer
 import exampleJavascriptApiUsersListAllUsers from '!!raw-loader!@site/docs/API-Reference/javascript-examples/api-users/list-all-users.js';
 import examplePythonApiUsersUpdateUser from '!!raw-loader!@site/docs/API-Reference/python-examples/api-users/update-user.py';
 import exampleJavascriptApiUsersUpdateUser from '!!raw-loader!@site/docs/API-Reference/javascript-examples/api-users/update-user.js';
+import examplePythonApiUsersSetUserPassword from '!!raw-loader!@site/docs/API-Reference/python-examples/api-users/set-user-password.py';
+import exampleJavascriptApiUsersSetUserPassword from '!!raw-loader!@site/docs/API-Reference/javascript-examples/api-users/set-user-password.js';
 import examplePythonApiUsersResetPassword from '!!raw-loader!@site/docs/API-Reference/python-examples/api-users/reset-password.py';
 import exampleJavascriptApiUsersResetPassword from '!!raw-loader!@site/docs/API-Reference/javascript-examples/api-users/reset-password.js';
 import examplePythonApiUsersDeleteUser from '!!raw-loader!@site/docs/API-Reference/python-examples/api-users/delete-user.py';
@@ -33,6 +36,9 @@ import exampleJavascriptApiUsersDeleteUser from '!!raw-loader!@site/docs/API-Ref
 
 
 Use the `/users` endpoint to manage user accounts in Langflow.
+
+As of Langflow 1.12, there is no **Admin Page** in the visual editor.
+Superusers add, activate, list, and delete users, set **Superuser**, and set another user's password with `PATCH /api/v1/users/{id}`.
 
 ## Add user
 
@@ -43,17 +49,17 @@ Requires authentication as a superuser if the Langflow server has authentication
 <Tabs>
 <TabItem value="Python" label="Python" default>
 
-<CodeSnippet source={examplePythonApiUsersAddUser} language="python" />
+<CodeBlock language="python">{examplePythonApiUsersAddUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="JavaScript" label="JavaScript">
 
-<CodeSnippet source={exampleJavascriptApiUsersAddUser} language="javascript" />
+<CodeBlock language="javascript">{exampleJavascriptApiUsersAddUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-<CodeSnippet source={exampleApiUsersAddUser} language="bash" />
+<CodeBlock language="bash">{exampleApiUsersAddUser}</CodeBlock>
 
 </TabItem>
 </Tabs>
@@ -65,7 +71,7 @@ This `user_id` key is specifically for Langflow user management.
 <details>
 <summary>Result</summary>
 
-<CodeSnippet source={resultApiUsersResultAddUser} language="json" />
+<CodeBlock language="json">{resultApiUsersResultAddUser}</CodeBlock>
 
 </details>
 
@@ -76,17 +82,17 @@ Retrieve information about the authenticated user.
 <Tabs>
 <TabItem value="Python" label="Python" default>
 
-<CodeSnippet source={examplePythonApiUsersGetCurrentUser} language="python" />
+<CodeBlock language="python">{examplePythonApiUsersGetCurrentUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="JavaScript" label="JavaScript">
 
-<CodeSnippet source={exampleJavascriptApiUsersGetCurrentUser} language="javascript" />
+<CodeBlock language="javascript">{exampleJavascriptApiUsersGetCurrentUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-<CodeSnippet source={exampleApiUsersGetCurrentUser} language="bash" />
+<CodeBlock language="bash">{exampleApiUsersGetCurrentUser}</CodeBlock>
 
 </TabItem>
 </Tabs>
@@ -94,7 +100,7 @@ Retrieve information about the authenticated user.
 <details>
 <summary>Result</summary>
 
-<CodeSnippet source={resultApiUsersResultGetCurrentUser} language="json" />
+<CodeBlock language="json">{resultApiUsersResultGetCurrentUser}</CodeBlock>
 
 </details>
 
@@ -107,17 +113,17 @@ Requires authentication as a superuser if the Langflow server has authentication
 <Tabs>
 <TabItem value="Python" label="Python" default>
 
-<CodeSnippet source={examplePythonApiUsersListAllUsers} language="python" />
+<CodeBlock language="python">{examplePythonApiUsersListAllUsers}</CodeBlock>
 
 </TabItem>
 <TabItem value="JavaScript" label="JavaScript">
 
-<CodeSnippet source={exampleJavascriptApiUsersListAllUsers} language="javascript" />
+<CodeBlock language="javascript">{exampleJavascriptApiUsersListAllUsers}</CodeBlock>
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-<CodeSnippet source={exampleApiUsersListAllUsers} language="bash" />
+<CodeBlock language="bash">{exampleApiUsersListAllUsers}</CodeBlock>
 
 </TabItem>
 </Tabs>
@@ -125,11 +131,11 @@ Requires authentication as a superuser if the Langflow server has authentication
 <details>
 <summary>Result</summary>
 
-<CodeSnippet source={resultApiUsersResultListAllUsers} language="json" />
+<CodeBlock language="json">{resultApiUsersResultListAllUsers}</CodeBlock>
 
 </details>
 
-## Update user
+## Update user {#update-user}
 
 Modify an existing user's information with a PATCH request.
 
@@ -140,17 +146,17 @@ This example activates the specified user's account and makes them a superuser:
 <Tabs>
 <TabItem value="Python" label="Python" default>
 
-<CodeSnippet source={examplePythonApiUsersUpdateUser} language="python" />
+<CodeBlock language="python">{examplePythonApiUsersUpdateUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="JavaScript" label="JavaScript">
 
-<CodeSnippet source={exampleJavascriptApiUsersUpdateUser} language="javascript" />
+<CodeBlock language="javascript">{exampleJavascriptApiUsersUpdateUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-<CodeSnippet source={exampleApiUsersUpdateUser} language="bash" />
+<CodeBlock language="bash">{exampleApiUsersUpdateUser}</CodeBlock>
 
 </TabItem>
 </Tabs>
@@ -158,30 +164,53 @@ This example activates the specified user's account and makes them a superuser:
 <details>
 <summary>Result</summary>
 
-<CodeSnippet source={resultApiUsersResultUpdateUser} language="json" />
+<CodeBlock language="json">{resultApiUsersResultUpdateUser}</CodeBlock>
 
 </details>
 
-## Reset password
-
-Change the specified user's password to a new secure value.
-
-Requires authentication as the target user.
+To set another user's password as an administrator, include `"password"` in the same `PATCH /api/v1/users/{id}` body.
+Only a superuser can set a password this way, and the current password is not required.
+Non-superusers cannot change passwords on this route.
 
 <Tabs>
 <TabItem value="Python" label="Python" default>
 
-<CodeSnippet source={examplePythonApiUsersResetPassword} language="python" />
+<CodeBlock language="python">{examplePythonApiUsersSetUserPassword}</CodeBlock>
 
 </TabItem>
 <TabItem value="JavaScript" label="JavaScript">
 
-<CodeSnippet source={exampleJavascriptApiUsersResetPassword} language="javascript" />
+<CodeBlock language="javascript">{exampleJavascriptApiUsersSetUserPassword}</CodeBlock>
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-<CodeSnippet source={exampleApiUsersResetPassword} language="bash" />
+<CodeBlock language="bash">{exampleApiUsersSetUserPassword}</CodeBlock>
+
+</TabItem>
+</Tabs>
+
+## Reset password
+
+Change **your own** password.
+
+Authenticate as the target user, send that user's `id` in the path, and include `current_password` plus the new `password`.
+A superuser resetting someone else's password must use [Update user](#update-user) instead.
+
+<Tabs>
+<TabItem value="Python" label="Python" default>
+
+<CodeBlock language="python">{examplePythonApiUsersResetPassword}</CodeBlock>
+
+</TabItem>
+<TabItem value="JavaScript" label="JavaScript">
+
+<CodeBlock language="javascript">{exampleJavascriptApiUsersResetPassword}</CodeBlock>
+
+</TabItem>
+<TabItem value="curl" label="curl">
+
+<CodeBlock language="bash">{exampleApiUsersResetPassword}</CodeBlock>
 
 </TabItem>
 </Tabs>
@@ -189,7 +218,7 @@ Requires authentication as the target user.
 <details>
 <summary>Result</summary>
 
-<CodeSnippet source={resultApiUsersResultResetPassword} language="json" />
+<CodeBlock language="json">{resultApiUsersResultResetPassword}</CodeBlock>
 
 </details>
 
@@ -202,17 +231,17 @@ Requires authentication as a superuser if the Langflow server has authentication
 <Tabs>
 <TabItem value="Python" label="Python" default>
 
-<CodeSnippet source={examplePythonApiUsersDeleteUser} language="python" />
+<CodeBlock language="python">{examplePythonApiUsersDeleteUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="JavaScript" label="JavaScript">
 
-<CodeSnippet source={exampleJavascriptApiUsersDeleteUser} language="javascript" />
+<CodeBlock language="javascript">{exampleJavascriptApiUsersDeleteUser}</CodeBlock>
 
 </TabItem>
 <TabItem value="curl" label="curl">
 
-<CodeSnippet source={exampleApiUsersDeleteUser} language="bash" />
+<CodeBlock language="bash">{exampleApiUsersDeleteUser}</CodeBlock>
 
 </TabItem>
 </Tabs>
@@ -220,6 +249,6 @@ Requires authentication as a superuser if the Langflow server has authentication
 <details>
 <summary>Result</summary>
 
-<CodeSnippet source={resultApiUsersResultDeleteUser} language="json" />
+<CodeBlock language="json">{resultApiUsersResultDeleteUser}</CodeBlock>
 
 </details>

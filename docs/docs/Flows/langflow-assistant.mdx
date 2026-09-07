@@ -1,15 +1,15 @@
 ---
-title: Build components with Langflow Assistant
+title: Build flows and components with Langflow Assistant
 slug: /langflow-assistant
 ---
 
 import Icon from "@site/src/components/icon";
 
-**Langflow Assistant** is an in-app virtual assistant pane within the **Playground**.
+**Langflow Assistant** is an in-app virtual assistant pane accessible from the canvas toolbar.
 
 It can answer questions about the application and help you get more out of Langflow.
 
-**Langflow Assistant** understands the structure of the Langflow graph, so it can create components from natural language prompts.
+**Langflow Assistant** understands the structure of the Langflow graph, so it can build complete flows or create individual components from natural language prompts.
 
 Behind the scenes, **Langflow Assistant** runs a built-in Langflow flow on your Langflow server each time you send a message.
 This flow is distinct from the flow that is open in the canvas, and has its own language model.
@@ -19,6 +19,17 @@ To give **Langflow Assistant** context for a different flow, switch to that flow
 ## Prerequisites
 
 * Connect an LLM provider in the [Global model providers page](/components-models) for **Langflow Assistant** to use
+* `LANGFLOW_AGENTIC_EXPERIENCE` must be `true` (default).
+
+  **Langflow Assistant** is available out of the box. Set this to `false` to turn it off for a deployment, for example if you don't want model-generated component code running on your server.
+  While it is off, the Assistant's endpoints return `404`.
+  For more information, see [Supported environment variables](/environment-variables#supported-variables).
+
+* Custom component creation must be enabled and permitted for your user role:
+  * `LANGFLOW_ALLOW_CUSTOM_COMPONENTS` must be `true` (default).
+   * `LANGFLOW_CUSTOM_COMPONENT_ADMIN_ONLY` must be `false` (default) for non-superusers. For superusers, this option is irrelevant.
+
+  For more information, see [Restrict custom component creation to superusers](/deployment-block-custom-components).
 
 ## Create a custom component with Langflow Assistant
 
@@ -26,7 +37,7 @@ In this example, you'll prompt **Langflow Assistant** to create a custom compone
 
 You'll then iterate on the code based on the results in the **Playground**.
 
-1. In the **Playground**, click the <Icon name="Langflow" aria-hidden="true"/> **Langflow** icon.
+1. In the canvas toolbar, click the <Icon name="Langflow" aria-hidden="true"/> **Langflow** icon.
     The **Langflow Assistant** pane opens.
 2. Optionally, ask `What can you help me with?` for a list of **Langflow Assistant's** capabilities.
 3. Prompt **Langflow Assistant** to generate a custom component. For example:
@@ -224,3 +235,97 @@ You'll then iterate on the code based on the results in the **Playground**.
     | https://langflow.org | Langflow \| Low-code AI builder for agentic and RAG applications | 200 |
     | https://github.com/langflow-ai/langflow | GitHub - langflow-ai/langflow: Langflow is a powerful tool for building and deploying AI-powered agents and workflows. - GitHub | 200 |
     | https://python.org | Welcome to Python.org | 200 |
+
+## Build an agent flow with Langflow Assistant
+
+:::warning
+Building a flow reads and writes the entire Langflow graph on every turn, which can use significantly more tokens than single-component generation.
+:::
+
+In addition to generating individual components, **Langflow Assistant** can create a flow from a single prompt.
+
+Continuing from the [Create a custom component with Langflow Assistant](#create-a-custom-component-with-langflow-assistant) example, ask **Langflow Assistant** to build a simple agent flow that uses the **URLTitleExtractor** custom component as a tool.
+
+1. With the **URLTitleExtractor** component still on the canvas, open **Langflow Assistant** and prompt it to build the agent flow:
+    ```
+    Build a simple agent flow using the URLTitleExtractor custom component as a tool.
+    ```
+
+2. Langflow Assistant presents a diagram of the flow it is proposing.
+    To approve, click **Add to Canvas**.
+
+    **Langflow Assistant** adds an **Agent** component, connects the **URLTitleExtractor** to its **Tools** input, and connects **Chat Input** and **Chat Output** to complete the flow.
+    Flow generation is model-driven, so the exact wiring may differ from this example.
+3. To iterate, describe changes to **Langflow Assistant**, and then click **Replace canvas** to replace the entire flow currently on the canvas. For example:
+    ```
+    Connect the URLTitleExtractor component's Toolset port to the Agent's Tools port.
+    ```
+4. Open the **Playground** and ask the agent to check a URL:
+    ```
+    What is the title of the page at https://langflow.org?
+    ```
+    The agent uses the **URLTitleExtractor** tool to fetch the page and return the title.
+
+5. **Langflow Assistant** can further iterate on the flow, or answer questions about Langflow.
+   For example, ask Langflow Assistant `How do I send an API request to chat with this flow in Python?`
+   The response includes a request sourced from the Langflow documentation that you can copy and paste into your application.
+
+## Reference canvas components in your prompts
+
+Reference components and their fields directly in a **Langflow Assistant** prompt using the `@` and `.` selectors.
+
+In the **Langflow Assistant** prompt input, enter `@`  to list all available components, and then select a component to insert its reference.
+To select a specific field within a component, enter `.` after the component.
+
+For example, to prompt **Langflow Assistant** to update the system prompt field on an Agent component, enter the following:
+```
+Update @Agent.System Prompt to always respond in bullet points.
+```
+
+## Use a local or OpenAI-compatible model
+
+**Langflow Assistant** can run on a model served from your own machine or from any OpenAI-compatible endpoint, so your prompts never leave your environment.
+
+To use a local model served by [Ollama](https://ollama.com), set the `OLLAMA_BASE_URL` global variable to your Ollama server, such as `http://localhost:11434`.
+Ollama requires no API key.
+
+To use an OpenAI-compatible server instead of OpenAI itself, set the `OPENAI_BASE_URL` global variable to your server's URL, and set `OPENAI_API_KEY` to the key your server expects.
+
+You can set both values as [global variables](/configuration-global-variables) or as environment variables of the same name.
+Global variables take precedence, and Langflow falls back to the environment variable when no global variable is set.
+
+:::important
+**Langflow Assistant** builds flows by calling tools, so it requires a model that supports tool calling.
+Small local models often can't call tools reliably, which appears as an Assistant that only chats and never changes your canvas.
+If the Assistant doesn't act on your prompts, try a larger model.
+:::
+
+## Connect an external client with MCP
+
+**Langflow Assistant** and Langflow's flow-authoring tools are available to external MCP clients, such as Cursor, Claude Code, and Codex, over a [streamable HTTP](https://modelcontextprotocol.io/docs/concepts/transports) MCP server at `/api/v1/agentic/mcp`.
+
+This lets a client build, inspect, patch, and run your flows without opening the visual editor, including a `run_assistant` tool that calls **Langflow Assistant** itself.
+Changes are saved to your flows and appear in the visual editor.
+
+The flow-authoring tools don't require `LANGFLOW_AGENTIC_EXPERIENCE`, because each one is a Langflow API call that your API key already authorizes.
+Only `run_assistant` requires it: while the Assistant is disabled, that single tool isn't listed and returns an error explaining why, and the rest of the toolkit keeps working.
+
+Authenticate with a Langflow API key, in the same way as Langflow's other MCP endpoints:
+
+```bash
+curl -X POST "$LANGFLOW_URL/api/v1/agentic/mcp" \
+  -H "x-api-key: $LANGFLOW_API_KEY" \
+  -H "Content-Type: application/json"
+```
+
+For an MCP client, point it at `$LANGFLOW_URL/api/v1/agentic/mcp` with your API key as an `x-api-key` header.
+Every tool call is authorized as your own user, so a client can only reach the flows your API key can reach.
+
+For more information on creating an API key, see [API keys](/api-keys-and-authentication).
+
+## See also
+
+- [Build flows](/concepts-flows)
+- [Custom components](/components-custom-components)
+- [MCP server](/mcp-server)
+- [Trigger flows with the Langflow API](/concepts-publish)

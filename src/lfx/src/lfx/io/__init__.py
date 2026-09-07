@@ -1,8 +1,10 @@
 from lfx.inputs import (
     BoolInput,
     CodeInput,
+    DataDisplayInput,
     DataFrameInput,
     DataInput,
+    DBProviderInput,
     DefaultPromptField,
     DictInput,
     DropdownInput,
@@ -34,6 +36,8 @@ from lfx.template import Output
 __all__ = [
     "BoolInput",
     "CodeInput",
+    "DBProviderInput",
+    "DataDisplayInput",
     "DataFrameInput",
     "DataInput",
     "DefaultPromptField",

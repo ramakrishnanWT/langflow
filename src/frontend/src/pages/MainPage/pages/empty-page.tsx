@@ -1,11 +1,12 @@
 import { ExternalLink } from "lucide-react";
-import { FaDiscord, FaGithub } from "react-icons/fa";
 import { useTranslation } from "react-i18next";
+import { FaDiscord, FaGithub } from "react-icons/fa";
 import { useShallow } from "zustand/react/shallow";
 import logoDarkPng from "@/assets/logo_dark.png";
 import logoLightPng from "@/assets/logo_light.png";
 import { ForwardedIconComponent } from "@/components/common/genericIconComponent";
 import CardsWrapComponent from "@/components/core/cardsWrapComponent";
+import { useStartNewFlow } from "@/components/core/flowBuilderWelcome/hooks/use-start-new-flow";
 import { Button } from "@/components/ui/button";
 import { DotBackgroundDemo } from "@/components/ui/dot-background";
 import { DISCORD_URL, GITHUB_URL } from "@/constants/constants";
@@ -32,6 +33,7 @@ export const EmptyPageCommunity = ({
   const discordCount: number = useDarkStore((state) => state.discordCount);
   const { mutate: updateUser } = useUpdateUser();
   const { mutate: mutateLoggedUser } = useGetUserData();
+  const startNewFlow = useStartNewFlow();
 
   const handleUserTrack = (key: string) => () => {
     const optins = userData?.optins ?? {};
@@ -61,7 +63,7 @@ export const EmptyPageCommunity = ({
               <div className="z-50 dark:hidden">
                 <img
                   src={logoLightPng}
-                  alt="Langflow Logo Light"
+                  alt={t("common.langflowLogoLight")}
                   data-testid="empty_page_logo_light"
                   className="relative top-8 h-40 pointer-events-none select-none"
                 />
@@ -69,7 +71,7 @@ export const EmptyPageCommunity = ({
               <div className="z-50 hidden dark:block">
                 <img
                   src={logoDarkPng}
-                  alt="Langflow Logo Dark"
+                  alt={t("common.langflowLogoDark")}
                   data-testid="empty_page_logo_dark"
                   className="relative top-8 h-40 pointer-events-none select-none"
                 />
@@ -94,7 +96,7 @@ export const EmptyPageCommunity = ({
             <div className="flex w-full max-w-[510px] flex-col gap-7 sm:gap-[29px]">
               <Button
                 unstyled
-                className="group mx-3 h-[84px] sm:mx-0"
+                className="group mx-3 min-h-[84px] sm:mx-0"
                 onClick={() => {
                   handleUserTrack("github_starred")();
                   window.open(GITHUB_URL, "_blank", "noopener,noreferrer");
@@ -104,7 +106,7 @@ export const EmptyPageCommunity = ({
                 <div className="relative flex flex-col rounded-lg border-[1px] bg-background p-4 transition-all duration-300 hover:border-accent-pink-foreground">
                   <div className="grid w-full items-center justify-between gap-2">
                     <div className="flex gap-3">
-                      <FaGithub className="h-6 w-6" />
+                      <FaGithub className="h-6 w-6" aria-hidden="true" />
                       <div>
                         <span className="font-semibold">GitHub</span>
                         <span className="ml-2 font-mono text-muted-foreground">
@@ -113,7 +115,7 @@ export const EmptyPageCommunity = ({
                       </div>
                     </div>
                     <div>
-                      <span className="text-base text-secondary-foreground">
+                      <span className="line-clamp-2 text-left text-base text-secondary-foreground">
                         {t("page.githubDescription")}
                       </span>
                     </div>
@@ -124,7 +126,7 @@ export const EmptyPageCommunity = ({
 
               <Button
                 unstyled
-                className="group mx-3 h-[84px] sm:mx-0"
+                className="group mx-3 min-h-[84px] sm:mx-0"
                 onClick={() => {
                   handleUserTrack("discord_clicked")();
                   window.open(DISCORD_URL, "_blank", "noopener,noreferrer");
@@ -134,7 +136,10 @@ export const EmptyPageCommunity = ({
                 <div className="relative flex flex-col rounded-lg border-[1px] bg-background p-4 transition-all duration-300 hover:border-discord-color">
                   <div className="grid w-full items-center justify-between gap-2">
                     <div className="flex gap-3">
-                      <FaDiscord className="h-6 w-6 text-discord-color" />
+                      <FaDiscord
+                        className="h-6 w-6 text-discord-color"
+                        aria-hidden="true"
+                      />
                       <div>
                         <span className="font-semibold">Discord</span>
                         <span className="ml-2 font-mono text-muted-foreground">
@@ -143,7 +148,7 @@ export const EmptyPageCommunity = ({
                       </div>
                     </div>
                     <div>
-                      <span className="text-base text-secondary-foreground">
+                      <span className="line-clamp-2 text-left text-base text-secondary-foreground">
                         {t("page.discordDescription")}
                       </span>
                     </div>
@@ -154,8 +159,8 @@ export const EmptyPageCommunity = ({
 
               <Button
                 variant="default"
-                className="z-10 m-auto mt-3 h-10 w-full max-w-[10rem] rounded-lg font-bold transition-all duration-300"
-                onClick={() => setOpenModal(true)}
+                className="z-10 m-auto mt-3 h-auto min-h-10 w-auto whitespace-normal rounded-lg font-bold transition-all duration-300"
+                onClick={() => startNewFlow()}
                 id="new-project-btn"
                 data-testid="new_project_btn_empty_page"
               >

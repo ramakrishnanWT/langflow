@@ -1,5 +1,6 @@
 import axios from "axios";
 import {
+  DEFAULT_ASSISTANT_MAX_MESSAGE_LENGTH,
   DEFAULT_POLLING_INTERVAL,
   DEFAULT_TIMEOUT,
 } from "@/constants/constants";
@@ -20,7 +21,11 @@ interface BaseConfig {
   event_delivery: EventDeliveryType;
   voice_mode_available: boolean;
   allow_custom_components: boolean;
+  substitute_outdated_component_code?: boolean;
+  catalog_governance_enabled: boolean;
   mcp_base_url: string;
+  // Runtime mirror of LANGFLOW_ENABLE_EXTENSION_RELOAD — see utilityStore.enableExtensionReload.
+  enable_extension_reload: boolean;
 }
 
 // Public config = base config (unauthenticated users get only base fields)
@@ -37,6 +42,20 @@ export interface ConfigResponse extends BaseConfig {
   webhook_auth_enable: boolean;
   default_folder_name: string;
   hide_getting_started_progress: boolean;
+  embedded_mode: boolean;
+  hide_logout_button: boolean;
+  hide_new_project_button: boolean;
+  hide_new_flow_button: boolean;
+  hide_starter_projects: boolean;
+  mcp_servers_locked: boolean;
+  custom_component_admin_only: boolean;
+  a2a_enabled: boolean;
+  agentic_experience: boolean;
+  assistant_max_message_length: number;
+  local_vector_store_available: boolean;
+  /** Component types an administrator blocked. Authenticated callers only:
+   *  the public response deliberately withholds the policy contents. */
+  blocked_component_types?: string[];
 }
 
 // Union type for the response (can be either public or full config)
@@ -83,14 +102,54 @@ export const useGetConfig: useQueryFunctionType<
   const setAllowCustomComponents = useUtilityStore(
     (state) => state.setAllowCustomComponents,
   );
+  const setSubstituteOutdatedComponentCode = useUtilityStore(
+    (state) => state.setSubstituteOutdatedComponentCode,
+  );
+  const setBlockedComponentTypes = useUtilityStore(
+    (state) => state.setBlockedComponentTypes,
+  );
+  const setCatalogGovernanceEnabled = useUtilityStore(
+    (state) => state.setCatalogGovernanceEnabled,
+  );
   const setMcpBaseUrl = useUtilityStore((state) => state.setMcpBaseUrl);
+  const setEnableExtensionReload = useUtilityStore(
+    (state) => state.setEnableExtensionReload,
+  );
+  const setEmbeddedMode = useUtilityStore((state) => state.setEmbeddedMode);
+  const setHideLogoutButton = useUtilityStore(
+    (state) => state.setHideLogoutButton,
+  );
+  const setHideNewProjectButton = useUtilityStore(
+    (state) => state.setHideNewProjectButton,
+  );
+  const setHideNewFlowButton = useUtilityStore(
+    (state) => state.setHideNewFlowButton,
+  );
+  const setHideStarterProjects = useUtilityStore(
+    (state) => state.setHideStarterProjects,
+  );
+  const setMcpServersLocked = useUtilityStore(
+    (state) => state.setMcpServersLocked,
+  );
+  const setCustomComponentAdminOnly = useUtilityStore(
+    (state) => state.setCustomComponentAdminOnly,
+  );
+  const setA2aEnabled = useUtilityStore((state) => state.setA2aEnabled);
+  const setAgenticExperienceEnabled = useUtilityStore(
+    (state) => state.setAgenticExperienceEnabled,
+  );
+  const setAssistantMaxMessageLength = useUtilityStore(
+    (state) => state.setAssistantMaxMessageLength,
+  );
+  const setLocalVectorStoreAvailable = useUtilityStore(
+    (state) => state.setLocalVectorStoreAvailable,
+  );
 
   const { query } = UseRequestProcessor();
 
   const getConfigFn = async () => {
-    // The /config endpoint returns different responses based on authentication:
-    // - Authenticated: Full ConfigResponse with all settings
-    // - Unauthenticated: PublicConfigResponse with limited settings
+    // Authenticated requests get the full ConfigResponse; unauthenticated ones
+    // get the limited PublicConfigResponse.
     const response = await api.get<ConfigResponseType>(`${getURL("CONFIG")}`);
     const data = response["data"];
     if (data) {
@@ -103,14 +162,28 @@ export const useGetConfig: useQueryFunctionType<
 
       // Set fields present in both public and full config
       setMaxFileSizeUpload(data.max_file_size_upload);
-      setEventDelivery(data.event_delivery ?? EventDeliveryType.POLLING);
+      setEventDelivery(data.event_delivery ?? EventDeliveryType.STREAMING);
       const allowCustomComponents = data.allow_custom_components ?? true;
       setAllowCustomComponents(allowCustomComponents);
+      setSubstituteOutdatedComponentCode(
+        data.substitute_outdated_component_code ?? true,
+      );
+      setCatalogGovernanceEnabled(Boolean(data.catalog_governance_enabled));
       setMcpBaseUrl(data.mcp_base_url ?? "");
+      setEnableExtensionReload(Boolean(data.enable_extension_reload));
       recomputeComponentsToUpdateIfNeeded();
 
       // Set authenticated-only fields if present (full config)
       if (isFullConfig(data)) {
+        // Authenticated only: the public response withholds the policy
+        // contents, and an anonymous caller has no editor to inform.
+        setBlockedComponentTypes(
+          Array.isArray(data.blocked_component_types)
+            ? data.blocked_component_types.filter(
+                (type): type is string => typeof type === "string",
+              )
+            : [],
+        );
         setAutoSaving(data.auto_saving);
         setAutoSavingInterval(data.auto_saving_interval);
         setHealthCheckMaxRetries(data.health_check_max_retries);
@@ -124,6 +197,21 @@ export const useGetConfig: useQueryFunctionType<
         setHideGettingStartedProgress(
           data.hide_getting_started_progress ?? false,
         );
+        // Embedded mode flags
+        setEmbeddedMode(data.embedded_mode ?? false);
+        setHideLogoutButton(data.hide_logout_button ?? false);
+        setHideNewProjectButton(data.hide_new_project_button ?? false);
+        setHideNewFlowButton(data.hide_new_flow_button ?? false);
+        setHideStarterProjects(data.hide_starter_projects ?? false);
+        setMcpServersLocked(data.mcp_servers_locked ?? false);
+        setCustomComponentAdminOnly(data.custom_component_admin_only ?? false);
+        setA2aEnabled(data.a2a_enabled ?? false);
+        setAgenticExperienceEnabled(data.agentic_experience ?? true);
+        setAssistantMaxMessageLength(
+          data.assistant_max_message_length ??
+            DEFAULT_ASSISTANT_MAX_MESSAGE_LENGTH,
+        );
+        setLocalVectorStoreAvailable(data.local_vector_store_available ?? true);
       }
     }
     return data;

@@ -10,12 +10,14 @@ from fastapi import HTTPException, Query, status
 from fastapi_pagination import Params
 from lfx.log.logger import logger
 from lfx.services.adapters.deployment.exceptions import (
+    DeploymentNotFoundError,
     DeploymentServiceError,
     ResourceConflictError,
     http_status_for_deployment_error,
 )
 from lfx.services.adapters.deployment.schema import (
     BaseFlowArtifact,
+    DeploymentGetResult,
     DeploymentType,
     DeploymentUpdateResult,
     SnapshotListParams,
@@ -43,9 +45,12 @@ from langflow.api.v1.schemas.deployments import (
 from langflow.initial_setup.setup import get_or_create_default_folder
 from langflow.services.adapters.deployment.context import deployment_provider_scope
 from langflow.services.database.models.deployment.crud import (
+    DeploymentMetadataUpdate,
     count_deployments_by_provider,
     delete_deployment_by_id,
     list_deployments_page,
+    update_deployment_metadata,
+    update_deployment_metadata_batch,
 )
 from langflow.services.database.models.deployment.crud import (
     get_deployment as get_deployment_db,
@@ -53,6 +58,9 @@ from langflow.services.database.models.deployment.crud import (
 from langflow.services.database.models.deployment.model import Deployment
 from langflow.services.database.models.deployment_provider_account.crud import (
     get_provider_account_by_id as get_provider_account_row_by_id,
+)
+from langflow.services.database.models.deployment_provider_account.crud import (
+    get_provider_account_by_id_unscoped as get_provider_account_row_by_id_unscoped,
 )
 from langflow.services.database.models.deployment_provider_account.model import DeploymentProviderAccount
 from langflow.services.database.models.flow.model import Flow
@@ -74,12 +82,19 @@ from langflow.services.database.utils import require_non_empty
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from lfx.services.authorization.base import ResourceVisibilityScope
+
     from langflow.api.utils import DbSession
     from langflow.services.database.models.flow_version_deployment_attachment.model import (
         FlowVersionDeploymentAttachment,
     )
 
     from .base import BaseDeploymentMapper
+
+
+def _dedup_uuids(items: Sequence[UUID]) -> list[UUID]:
+    """Return unique UUIDs (first-seen order preserved)."""
+    return list(dict.fromkeys(items))
 
 
 def parse_flow_version_reference_ids(reference_ids: Sequence[UUID | str]) -> list[UUID]:
@@ -94,7 +109,7 @@ def parse_flow_version_reference_ids(reference_ids: Sequence[UUID | str]) -> lis
             flow_version_ids.append(UUID(flow_version_ref_str))
         except ValueError as exc:
             msg = f"Invalid flow version id: {flow_version_ref}"
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=msg) from exc
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=msg) from exc
     return flow_version_ids
 
 
@@ -170,7 +185,7 @@ async def build_flow_artifacts_from_flow_versions(
     for row in rows:
         if row.flow_version_data is None:
             msg = f"Flow version {row.flow_version_id} has no data (snapshot may be corrupted)."
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=msg)
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=msg)
         artifacts.append(
             (
                 row.flow_version_id,
@@ -238,7 +253,7 @@ async def build_project_scoped_flow_artifacts_from_flow_versions(
     for row in rows:
         if row.flow_version_data is None:
             msg = f"Flow version {row.flow_version_id} has no data (snapshot may be corrupted)."
-            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=msg)
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=msg)
         artifacts.append(
             (
                 row.flow_version_id,
@@ -264,7 +279,7 @@ async def validate_project_scoped_flow_version_ids(
     """Ensure all flow-version ids belong to flows in a specific project."""
     if not flow_version_ids:
         return
-    unique_flow_version_ids = list(dict.fromkeys(flow_version_ids))
+    unique_flow_version_ids = _dedup_uuids(flow_version_ids)
     matched_count = int(
         (
             await db.exec(
@@ -289,6 +304,85 @@ async def validate_project_scoped_flow_version_ids(
     if matched_count != len(unique_flow_version_ids):
         msg = "One or more flow version ids are not checkpoints of flows in the selected project."
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+
+
+async def flow_ids_for_version_ids(
+    *,
+    flow_version_ids: list[UUID],
+    owner_id: UUID,
+    db,
+) -> list[UUID]:
+    """Return distinct flow ids for ``flow_version_ids`` in ``owner_id``'s namespace.
+
+    Every unique version id must resolve to a row (matched count == unique input
+    length). An empty match set alone is not enough — that would also pass when
+    versions are missing. Many versions may share one flow; the returned list is
+    de-duplicated for authorization callers.
+
+    Raises:
+        HTTPException: 404 when one or more version ids are missing under
+            ``owner_id``.
+    """
+    if not flow_version_ids:
+        return []
+
+    unique_flow_version_ids = _dedup_uuids(flow_version_ids)
+    matched_flow_ids = list(
+        (
+            await db.exec(
+                select(FlowVersion.flow_id).where(
+                    FlowVersion.user_id == owner_id,
+                    col(FlowVersion.id).in_(unique_flow_version_ids),
+                )
+            )
+        ).all()
+    )
+    if len(matched_flow_ids) != len(unique_flow_version_ids):
+        msg = "One or more flow version ids were not found."
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+    return _dedup_uuids(matched_flow_ids)
+
+
+async def ensure_flow_deploy_for_version_ids(
+    *,
+    user: Any,
+    flow_version_ids: list[UUID],
+    owner_id: UUID,
+    db,
+    project_id: UUID | None = None,
+    workspace_id: UUID | None = None,
+) -> None:
+    """Authorize ``FlowAction.DEPLOY`` for every distinct flow behind ``flow_version_ids``.
+
+    Deployment create/update/snapshot replacement publish flow artifacts to the
+    provider. Holding ``deployment:create`` / ``deployment:write`` is not enough —
+    each affected flow must also pass ``flow:deploy`` before artifacts are read
+    or the provider is called. Versions are resolved in ``owner_id``'s namespace
+    (the deployment / flow owner); ``user`` remains the actor for the decision.
+
+    ``project_id`` / ``workspace_id`` become the authz domain (``project:{id}`` /
+    ``workspace:{id}``) so project-scoped ``flow:deploy`` grants match. Flow
+    routes use ``folder_id`` for the same project scope.
+
+    Resolution and authorization are split so the DB load is one query and the
+    permission check is a batched ``batch_enforce`` (not N ``ensure_flow_permission``
+    round-trips). Missing versions fail with 404 before any enforce call.
+    """
+    from langflow.services.authorization import FlowAction, ensure_flows_permission
+
+    flow_ids = await flow_ids_for_version_ids(
+        flow_version_ids=flow_version_ids,
+        owner_id=owner_id,
+        db=db,
+    )
+    await ensure_flows_permission(
+        user,
+        FlowAction.DEPLOY,
+        flow_ids=flow_ids,
+        flow_user_id=owner_id,
+        folder_id=project_id,
+        workspace_id=workspace_id,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -380,6 +474,32 @@ async def get_owned_provider_account_or_404(
     return provider_account
 
 
+async def get_shared_listing_provider_account_or_404(
+    *,
+    provider_id: UUID,
+    db: DbSession,
+) -> DeploymentProviderAccount:
+    """Resolve a provider account by id alone for the deployment-list prefilter path.
+
+    Used by ``list_deployments`` *only* when ``visible_id_prefilter`` returns a
+    concrete list (a registered authorization plugin is engaged). A shared
+    deployment lives under its *owner's* provider account, so the strict owner
+    gate (``get_owned_provider_account_or_404``) would 404 a cross-user reader
+    before the ``(owner ⊕ visible)`` SQL union in ``list_deployments_synced``
+    could surface the row. Loading the account by id here only widens which
+    ``provider_key`` may be resolved (adapter/mapper); row-level access stays
+    governed by that union plus ``ensure_deployment_permission``, and the list
+    response carries no provider secrets (only ``provider_key`` is read).
+
+    The OSS pass-through always declines the prefilter, so this path is never
+    taken on default installs — the owner-scoped gate is preserved there exactly.
+    """
+    provider_account = await get_provider_account_row_by_id_unscoped(db, provider_id=provider_id)
+    if provider_account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment provider account not found.")
+    return provider_account
+
+
 async def resolve_adapter_mapper_from_provider_id(
     provider_id: UUID,
     *,
@@ -426,6 +546,10 @@ async def get_deployment_row_or_404(
     user_id: UUID,
     db: DbSession,
 ) -> Deployment:
+    # ``get_deployment_db`` is share-aware when an authorization plugin is
+    # registered and ``LANGFLOW_AUTHZ_ENABLED`` is on; otherwise it stays
+    # owner-scoped. Routes still call ``ensure_deployment_permission`` after
+    # this to authorize the actor against the resolved deployment.
     deployment_row = await get_deployment_db(db, user_id=user_id, deployment_id=deployment_id)
     if deployment_row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found.")
@@ -440,9 +564,13 @@ async def resolve_adapter_from_deployment(
 ) -> tuple[Deployment, DeploymentServiceProtocol, str, str | None]:
     """Returns ``(deployment_row, adapter, provider_key, provider_tenant_id)``."""
     deployment_row = await get_deployment_row_or_404(deployment_id=deployment_id, user_id=user_id, db=db)
+    # The provider account lives in the deployment owner's namespace, not the
+    # actor's. For shared deployments the actor may have no provider account
+    # of their own — scope the lookup by ``deployment_row.user_id`` so a
+    # cross-user deployment share resolves correctly.
     provider_account = await get_owned_provider_account_or_404(
         provider_id=deployment_row.deployment_provider_account_id,
-        user_id=user_id,
+        user_id=deployment_row.user_id,
         db=db,
     )
     deployment_adapter = resolve_deployment_adapter(provider_account.provider_key)
@@ -459,9 +587,11 @@ async def resolve_adapter_mapper_from_deployment(
     from langflow.api.v1.mappers.deployments.registry import get_deployment_mapper
 
     deployment_row = await get_deployment_row_or_404(deployment_id=deployment_id, user_id=user_id, db=db)
+    # Resolve the provider account against the deployment owner so cross-user
+    # share grants reach the right row; see ``resolve_adapter_from_deployment``.
     provider_account = await get_owned_provider_account_or_404(
         provider_id=deployment_row.deployment_provider_account_id,
-        user_id=user_id,
+        user_id=deployment_row.user_id,
         db=db,
     )
     deployment_adapter = resolve_deployment_adapter(provider_account.provider_key)
@@ -692,6 +822,141 @@ async def rollback_provider_update(
         )
 
 
+async def sync_deployment_display_metadata(
+    db: DbSession,
+    *,
+    deployment: Deployment,
+    provider_metadata: dict[str, Any],
+    user_id: UUID,
+) -> Deployment:
+    """Sync provider-owned display metadata into a local deployment row."""
+    # Provider metadata sync runs in the deployment owner's namespace (see RBAC
+    # actor/owner split on deployment routes). ``user_id`` must be that owner.
+    return await update_deployment_metadata(
+        db,
+        user_id=user_id,
+        deployment=deployment,
+        **provider_metadata,
+    )
+
+
+async def sync_deployment_attachment_count_for_get(
+    *,
+    deployment_mapper: BaseDeploymentMapper,
+    provider_deployment: DeploymentGetResult,
+    deployment: Deployment,
+    provider_key: str,
+    user_id: UUID,
+    db: DbSession,
+) -> int:
+    """Reconcile tracked attachments against provider binding state for this deployment."""
+    try:
+        bindings = deployment_mapper.extract_snapshot_bindings_for_get(
+            provider_deployment,
+            resource_key=deployment.resource_key,
+        )
+
+        async with db.begin_nested():
+            await delete_unbound_attachments(
+                db=db,
+                user_id=user_id,
+                provider_account_id=deployment.deployment_provider_account_id,
+                deployment_ids=[deployment.id],
+                bindings=bindings,
+            )
+
+        return await count_deployment_attachments(db, user_id=user_id, deployment_id=deployment.id)
+    except NotImplementedError as exc:
+        logger.error(
+            "Mapper for provider %s does not support binding-aware GET sync for deployment %s",
+            provider_key,
+            deployment.id,
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Deployment provider {provider_key} does not support binding-aware GET sync "
+                f"for deployment {deployment.id}."
+            ),
+        ) from exc
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "Binding-aware sync failed for deployment %s; returning unverified attachment count",
+            deployment.id,
+            exc_info=True,
+        )
+        await db.rollback()  # rollback outer session to avoid partially synced state
+        try:
+            return await count_deployment_attachments(db, user_id=user_id, deployment_id=deployment.id)
+        except Exception as exc:
+            logger.warning(
+                "Fallback attachment count query also failed for deployment %s",
+                deployment.id,
+                exc_info=True,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to retrieve the number of flows attached to deployment {deployment.id}.",
+            ) from exc
+
+
+async def get_deployment_synced(
+    *,
+    deployment_adapter: DeploymentServiceProtocol,
+    deployment_mapper: BaseDeploymentMapper,
+    deployment: Deployment,
+    provider_key: str,
+    user_id: UUID,
+    db: DbSession,
+) -> tuple[Deployment, DeploymentGetResult, int]:
+    """Fetch a provider deployment and sync local state."""
+    try:
+        provider_deployment = await deployment_adapter.get(
+            user_id=user_id,
+            deployment_id=deployment.resource_key,
+            db=db,
+        )
+    except DeploymentNotFoundError:
+        logger.warning(
+            "Deployment %s (resource_key=%s) not found on provider — deleting stale row",
+            deployment.id,
+            deployment.resource_key,
+        )
+        try:
+            await delete_deployment_by_id(db, user_id=user_id, deployment_id=deployment.id)
+            await db.commit()
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Failed to delete stale deployment row %s; returning 404 anyway",
+                deployment.id,
+                exc_info=True,
+            )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Deployment not found.") from None
+    except DeploymentServiceError as exc:
+        raise HTTPException(
+            status_code=http_status_for_deployment_error(exc),
+            detail=exc.message,
+        ) from exc
+
+    provider_metadata = deployment_mapper.extract_metadata_for_get(provider_deployment)
+    deployment = await sync_deployment_display_metadata(
+        db,
+        deployment=deployment,
+        provider_metadata=provider_metadata,
+        user_id=user_id,
+    )
+    attached_count = await sync_deployment_attachment_count_for_get(
+        deployment_mapper=deployment_mapper,
+        provider_deployment=provider_deployment,
+        deployment=deployment,
+        provider_key=provider_key,
+        user_id=user_id,
+        db=db,
+    )
+    return deployment, provider_deployment, attached_count
+
+
 async def list_deployments_synced(
     *,
     deployment_adapter: DeploymentServiceProtocol,
@@ -702,18 +967,40 @@ async def list_deployments_synced(
     page: int,
     size: int,
     deployment_type: DeploymentType | None,
+    row_owner_id: UUID | None = None,
     flow_version_ids: list[UUID] | None = None,
     project_id: UUID | None = None,
-) -> tuple[list[tuple[Deployment, int, list[tuple[UUID, str | None]]]], int]:
+    allowed_ids: list[UUID] | None = None,
+    visibility_scope: ResourceVisibilityScope | None = None,
+) -> tuple[list[tuple[Deployment, int, list[tuple[UUID, str | None]]]], int, dict[str, dict[str, Any]]]:
     """Return a page of deployments, deleting any DB rows the provider doesn't recognise.
 
     Fetches DB rows in batches, sends each batch's resource keys to the
-    provider for validation, and deletes stale rows inline. The cursor does
-    not advance for deleted rows (deletion shifts subsequent offsets down).
+    provider for validation, deletes stale rows inline, and syncs
+    provider-owned display metadata for rows that still exist. The cursor
+    does not advance for deleted rows (deletion shifts subsequent offsets down).
+
+    ``user_id`` is the actor used for the owner-plus-visible database query.
+    ``row_owner_id`` is the provider-account owner namespace (credentials +
+    attachments); it defaults to the actor for owner-only callers. Shared
+    listing passes them separately so provider calls stay in the account
+    owner's namespace.
+
+    ``visibility_scope`` is the preferred DB-layer authorization prefilter;
+    ``allowed_ids`` remains its concrete-ID compatibility form. Both are
+    threaded into the page and count queries so pagination stays consistent.
+
+    Note that this helper deletes and writes to shared deployment resources
+    without any permission checks. In most cases that is unacceptable. It is
+    acceptable here because those writes synchronize provider state into
+    Langflow, not perform arbitrary actions on behalf of any user.
     """
+    provider_namespace_user_id = row_owner_id or user_id
     accepted: list[tuple[Deployment, int, list[tuple[UUID, str | None]]]] = []
     accepted_deployment_ids: list[UUID] = []
     provider_bindings: list[ProviderSnapshotBinding] = []
+    provider_data_by_resource_key: dict[str, dict[str, Any]] = {}
+    provider_metadata_by_resource_key: dict[str, dict[str, Any]] = {}
     cursor = page_offset(page, size)
     max_sync_rounds = 2  # Initial pass + one refill pass.
     for _ in range(max_sync_rounds):
@@ -722,24 +1009,29 @@ async def list_deployments_synced(
         batch = await list_deployments_page(
             db,
             user_id=user_id,
+            row_owner_id=provider_namespace_user_id,
             deployment_provider_account_id=provider_id,
             offset=cursor,
             limit=size - len(accepted),
             flow_version_ids=flow_version_ids,
             project_id=project_id,
+            allowed_ids=allowed_ids,
+            visibility_scope=visibility_scope,
         )
         if not batch:
             break
 
         known, provider_view = await fetch_provider_resource_keys(
             deployment_adapter=deployment_adapter,
-            user_id=user_id,
+            user_id=provider_namespace_user_id,
             provider_id=provider_id,
             db=db,
             resource_keys=[row.resource_key for row, _, _ in batch],
             deployment_type=deployment_type,
         )
         provider_bindings.extend(deployment_mapper.extract_snapshot_bindings(provider_view))
+        provider_data_by_resource_key.update(deployment_mapper.extract_list_item_provider_data(provider_view))
+        provider_metadata_by_resource_key.update(deployment_mapper.extract_metadata_for_list(provider_view))
 
         for row, attached_count, matched_flow_versions in batch:
             if row.resource_key not in known:
@@ -753,21 +1045,39 @@ async def list_deployments_synced(
                     row.resource_key,
                     provider_id,
                 )
-                await delete_deployment_by_id(db, user_id=user_id, deployment_id=row.id)
+                await delete_deployment_by_id(db, user_id=row.user_id, deployment_id=row.id)
                 continue
             accepted.append((row, attached_count, matched_flow_versions))
             accepted_deployment_ids.append(row.id)
             cursor += 1
 
-    # Phase 2: binding-level sync.
+    # Phase 2: synchronize provider state into Langflow. These updates/deletes
+    # skip permission checks — acceptable only as provider→Langflow reconciliation,
+    # not as arbitrary user-driven writes (see docstring).
+    if accepted:
+        metadata_updates: list[DeploymentMetadataUpdate] = []
+        for row, _attached_count, _matched in accepted:
+            provider_metadata = provider_metadata_by_resource_key[row.resource_key]
+            metadata_updates.append(
+                DeploymentMetadataUpdate(
+                    langflow_db_row=row,
+                    **provider_metadata,
+                )
+            )
+        await update_deployment_metadata_batch(
+            db,
+            deployment_updates=metadata_updates,
+        )
+
     # Remove stale local attachments based on provider bindings, then recount.
     # Best-effort - provider or DB failures should not block the list response.
+    # Same sync-only rationale as phase 2 metadata (no permission checks).
     if accepted:
         try:
             async with db.begin_nested():
                 await delete_unbound_attachments(
                     db,
-                    user_id=user_id,
+                    user_id=provider_namespace_user_id,
                     provider_account_id=provider_id,
                     deployment_ids=accepted_deployment_ids,
                     bindings=provider_bindings,
@@ -775,7 +1085,7 @@ async def list_deployments_synced(
 
             corrected_counts = await count_attachments_by_deployment_ids(
                 db,
-                user_id=user_id,
+                user_id=provider_namespace_user_id,
                 deployment_ids=accepted_deployment_ids,
             )
             accepted = [(row, corrected_counts[row.id], matched) for row, _attached_count, matched in accepted]
@@ -788,11 +1098,14 @@ async def list_deployments_synced(
     total = await count_deployments_by_provider(
         db,
         user_id=user_id,
+        row_owner_id=provider_namespace_user_id,
         deployment_provider_account_id=provider_id,
         flow_version_ids=flow_version_ids,
         project_id=project_id,
+        allowed_ids=allowed_ids,
+        visibility_scope=visibility_scope,
     )
-    return accepted, total
+    return accepted, total, provider_data_by_resource_key
 
 
 async def list_deployment_flow_versions_synced(

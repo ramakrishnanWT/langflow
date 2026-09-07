@@ -4,15 +4,23 @@ import type {
   AgenticCancelledEvent,
   AgenticCompleteEvent,
   AgenticErrorEvent,
+  AgenticFileWrittenEvent,
+  AgenticFlowPreviewEvent,
+  AgenticFlowUpdateEvent,
   AgenticProgressEvent,
   AgenticSSEEvent,
   AgenticTokenEvent,
+  AgenticToolStartEvent,
 } from "./types";
 
 interface StreamCallbacks {
   onProgress?: (event: AgenticProgressEvent) => void;
   onToken?: (event: AgenticTokenEvent) => void;
   onComplete?: (event: AgenticCompleteEvent) => void;
+  onFlowPreview?: (event: AgenticFlowPreviewEvent) => void;
+  onFlowUpdate?: (event: AgenticFlowUpdateEvent) => void;
+  onToolStart?: (event: AgenticToolStartEvent) => void;
+  onFileWritten?: (event: AgenticFileWrittenEvent) => void;
   onError?: (event: AgenticErrorEvent) => void;
   onCancelled?: (event: AgenticCancelledEvent) => void;
 }
@@ -55,6 +63,18 @@ function processSSELine(
     case "complete":
       callbacks.onComplete?.(event);
       return { done: true };
+    case "flow_preview":
+      callbacks.onFlowPreview?.(event);
+      break;
+    case "flow_update":
+      callbacks.onFlowUpdate?.(event);
+      break;
+    case "tool_start":
+      callbacks.onToolStart?.(event);
+      break;
+    case "file_written":
+      callbacks.onFileWritten?.(event);
+      break;
     case "error":
       callbacks.onError?.(event);
       return { done: true };
@@ -142,8 +162,19 @@ export async function postAssistStream(
 
     // Process any remaining data in the buffer
     if (buffer.trim()) {
-      processSSELine(buffer.trim(), callbacks);
+      const result = processSSELine(buffer.trim(), callbacks);
+      if (result.done) {
+        return;
+      }
     }
+
+    // Reader ended without a terminal event (dropped connection, server crash):
+    // surface a terminal error so the caller clears the spinner instead of hanging.
+    callbacks.onError?.({
+      event: "error",
+      message:
+        "The assistant connection ended unexpectedly before completing. Please try again.",
+    });
   } finally {
     await reader.cancel();
     reader.releaseLock();

@@ -20,8 +20,8 @@ import requests
 sys.path.insert(0, str(Path(__file__).parent))
 import pypi_nightly_tag as nt
 
-MAIN_URL = nt.PYPI_LANGFLOW_NIGHTLY_URL
-BASE_URL = nt.PYPI_LANGFLOW_BASE_NIGHTLY_URL
+MAIN_URL = nt.PYPI_LANGFLOW_URL
+BASE_URL = nt.PYPI_LANGFLOW_BASE_URL
 
 
 class _FakeResponse:
@@ -60,8 +60,11 @@ def _build_response(spec):
 
 
 def _run(main=None, base=None, *, base_version="1.10.0", build_type="both"):
-    """Compute a tag with mocked PyPI responses for the main and base nightly packages."""
-    responses = {MAIN_URL: _build_response(main), BASE_URL: _build_response(base)}
+    """Compute a tag with mocked PyPI responses for the full/base packages."""
+    responses = {
+        MAIN_URL: _build_response(main),
+        BASE_URL: _build_response(base),
+    }
 
     def fake_get(url, timeout=10):  # noqa: ARG001
         return responses[url]

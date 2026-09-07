@@ -11,6 +11,12 @@ import {
   LLMS_MOCK,
   PROVIDERS_MOCK,
 } from "../../utils/deployment-mocks";
+import { getDefaultProjectIdForTest } from "../../utils/get-default-project-id-for-test.mjs";
+
+test.skip(
+  process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
+  "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
+);
 
 async function setupRoutes(page: Parameters<typeof test>[2]["page"]) {
   // Register broad catch-all FIRST so specific routes (registered after) take priority via LIFO
@@ -83,15 +89,24 @@ async function openEditDialog(page: Parameters<typeof test>[2]["page"]) {
   await page.waitForSelector('[data-testid="stepper-modal-title"]');
 }
 
+async function expectDeploymentTypeStep(
+  page: Parameters<typeof test>[2]["page"],
+) {
+  await expect(
+    page.getByRole("heading", { name: /Deployment Type/i }),
+  ).toBeVisible();
+}
+
+async function expectFlowsStep(page: Parameters<typeof test>[2]["page"]) {
+  await expect(page.getByRole("heading", { name: /^Flows$/i })).toBeVisible();
+}
+
 test(
   "Opens edit stepper from actions menu",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
     await setupRoutes(page);
     await navigateToDeployments(page);
 
@@ -110,13 +125,10 @@ test(
 
 test(
   "Edit mode skips provider step — starts at Type",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
     await setupRoutes(page);
     await navigateToDeployments(page);
 
@@ -126,7 +138,7 @@ test(
     await openEditDialog(page);
 
     // Wait for stepper body to render (parallel fetches must complete)
-    await page.waitForSelector('h2:has-text("Deployment Type")');
+    await expectDeploymentTypeStep(page);
 
     await expect(page.getByText("Deployment Type")).toBeVisible();
 
@@ -141,13 +153,10 @@ test(
 
 test(
   "Name field pre-populated in edit mode",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
     await setupRoutes(page);
     await navigateToDeployments(page);
 
@@ -157,7 +166,7 @@ test(
     await openEditDialog(page);
 
     // Wait for stepper body to render
-    await page.waitForSelector('h2:has-text("Deployment Type")');
+    await expectDeploymentTypeStep(page);
 
     const nameInput = page.getByPlaceholder("e.g., Sales Bot");
     await expect(nameInput).toHaveValue("Test Deployment");
@@ -166,13 +175,10 @@ test(
 
 test(
   "Submitting PATCH closes modal",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
     await setupRoutes(page);
     await navigateToDeployments(page);
 
@@ -182,13 +188,17 @@ test(
     await openEditDialog(page);
 
     // Wait for stepper body to render (parallel fetches must complete)
-    await page.waitForSelector('h2:has-text("Deployment Type")');
+    await expectDeploymentTypeStep(page);
+
+    // Change the name so the update payload is non-empty (no-op saves keep the modal open)
+    const nameInput = page.getByPlaceholder("e.g., Sales Bot");
+    await nameInput.fill("Updated Deployment");
 
     // Navigate through the stepper steps to reach Review
     // Step: Type → click Next
     await page.getByTestId("deployment-stepper-next").click();
 
-    // Step: Attach Flows → click Next
+    // Step: Flows → click Next
     await page.getByTestId("deployment-stepper-next").click();
 
     // Step: Review → click Update (final step)
@@ -209,13 +219,10 @@ test(
 
 test(
   "Cancel during edit closes modal without calling PATCH",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
     await setupRoutes(page);
     await navigateToDeployments(page);
 
@@ -225,7 +232,7 @@ test(
     await openEditDialog(page);
 
     // Wait for stepper body to render
-    await page.waitForSelector('h2:has-text("Deployment Type")');
+    await expectDeploymentTypeStep(page);
 
     let patchCalled = false;
     page.on("request", (req) => {
@@ -356,35 +363,12 @@ async function setupRoutesWithConnections(
 // ---------------------------------------------------------------------------
 test(
   "Edit mode includes new connections in PATCH request",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
-    // Capture folder ID from the projects API before bootstrap
-    const projectsResponsePromise = page.waitForResponse(
-      (resp) =>
-        resp.url().includes("/api/v1/projects") && resp.status() === 200,
-      { timeout: 30000 },
-    );
-
     await awaitBootstrapTest(page, { skipModal: true });
-
-    let folderId = "";
-    try {
-      const projectsResp = await projectsResponsePromise;
-      const folders = await projectsResp.json();
-      const match = Array.isArray(folders)
-        ? (folders.find(
-            (f: { name: string; id: string }) => f.name === "Starter Project",
-          ) ?? folders[0])
-        : null;
-      folderId = (match as { id: string } | null)?.id ?? "";
-    } catch {
-      // proceed
-    }
+    const folderId = await getDefaultProjectIdForTest(page);
 
     await setupRoutesWithConnections(page, folderId);
     await page.getByTestId("deployments-btn").click();
@@ -399,17 +383,17 @@ test(
     await page.waitForSelector('[data-testid="stepper-modal-title"]');
 
     // Step 1 (Type) → Next
-    await page.waitForSelector('h2:has-text("Deployment Type")');
+    await expectDeploymentTypeStep(page);
     await page.getByTestId("deployment-stepper-next").click();
 
-    // Step 2 (Attach Flows) — flow "f1" should already be attached
-    await page.waitForSelector("text=Attach Flows");
+    // Step 2 (Flows) — flow "f1" should already be attached
+    await expectFlowsStep(page);
     await page.waitForSelector('[data-testid="flow-item-f1"]');
 
     // Click the pre-attached flow and its version to open the connection panel
     await page.getByTestId("flow-item-f1").click();
     await page.waitForSelector('[data-testid="version-item-fv1"]');
-    await page.getByTestId("version-item-fv1").click();
+    await page.getByTestId("version-item-fv1-select").click();
 
     // Wait for connection panel to appear with available connections
     await page.waitForSelector('[data-testid="connection-item-existing-app"]');
@@ -455,34 +439,12 @@ test(
 // ---------------------------------------------------------------------------
 test(
   "Edit mode includes removed connections in PATCH request",
-  { tag: ["@release", "@workspace", "@api"] },
+  {
+    tag: ["@release", "@workspace", "@api"],
+  },
   async ({ page }) => {
-    test.skip(
-      process.env.LANGFLOW_FEATURE_WXO_DEPLOYMENTS !== "true",
-      "Requires LANGFLOW_FEATURE_WXO_DEPLOYMENTS=true",
-    );
-
-    const projectsResponsePromise = page.waitForResponse(
-      (resp) =>
-        resp.url().includes("/api/v1/projects") && resp.status() === 200,
-      { timeout: 30000 },
-    );
-
     await awaitBootstrapTest(page, { skipModal: true });
-
-    let folderId = "";
-    try {
-      const projectsResp = await projectsResponsePromise;
-      const folders = await projectsResp.json();
-      const match = Array.isArray(folders)
-        ? (folders.find(
-            (f: { name: string; id: string }) => f.name === "Starter Project",
-          ) ?? folders[0])
-        : null;
-      folderId = (match as { id: string } | null)?.id ?? "";
-    } catch {
-      // proceed
-    }
+    const folderId = await getDefaultProjectIdForTest(page);
 
     await setupRoutesWithConnections(page, folderId);
     await page.getByTestId("deployments-btn").click();
@@ -497,15 +459,15 @@ test(
     await page.waitForSelector('[data-testid="stepper-modal-title"]');
 
     // Step 1 (Type) → Next
-    await page.waitForSelector('h2:has-text("Deployment Type")');
+    await expectDeploymentTypeStep(page);
     await page.getByTestId("deployment-stepper-next").click();
 
-    // Step 2 (Attach Flows)
-    await page.waitForSelector("text=Attach Flows");
+    // Step 2 (Flows)
+    await expectFlowsStep(page);
     await page.waitForSelector('[data-testid="flow-item-f1"]');
     await page.getByTestId("flow-item-f1").click();
     await page.waitForSelector('[data-testid="version-item-fv1"]');
-    await page.getByTestId("version-item-fv1").click();
+    await page.getByTestId("version-item-fv1-select").click();
 
     // Wait for connection panel
     await page.waitForSelector('[data-testid="connection-item-existing-app"]');

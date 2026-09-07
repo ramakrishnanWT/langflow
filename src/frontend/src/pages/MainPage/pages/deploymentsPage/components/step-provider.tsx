@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import ForwardedIconComponent from "@/components/common/genericIconComponent";
 import { Badge } from "@/components/ui/badge";
 import { useGetProviderAccounts } from "@/controllers/API/queries/deployment-provider-accounts/use-get-provider-accounts";
+import { decorateWxoUrl } from "@/utils/decorate-wxo-url";
 import { cn } from "@/utils/utils";
 import { useDeploymentStepper } from "../contexts/deployment-stepper-context";
 import type { DeploymentProvider, ProviderAccount } from "../types";
+import { handleTabListKeyDown } from "../utils/tab-keyboard-navigation";
 import ProviderCredentialsForm from "./provider-credentials-form";
 import { RadioSelectItem } from "./radio-select-item";
 
@@ -19,6 +22,8 @@ const PROVIDERS: DeploymentProvider[] = [
 
 type EnvironmentTab = "existing" | "new";
 
+const ENVIRONMENT_TABS: EnvironmentTab[] = ["existing", "new"];
+
 function EnvironmentTabToggle({
   activeTab,
   onTabChange,
@@ -26,14 +31,34 @@ function EnvironmentTabToggle({
   activeTab: EnvironmentTab;
   onTabChange: (tab: EnvironmentTab) => void;
 }) {
+  const { t } = useTranslation();
+
   return (
     <div className="rounded-xl border border-border bg-muted p-1">
-      <div className="grid grid-cols-2 gap-4">
-        {(["existing", "new"] as const).map((tab) => (
+      <div
+        role="tablist"
+        aria-label={t("deployments.environmentTabsAriaLabel")}
+        className="grid grid-cols-2 gap-4"
+      >
+        {ENVIRONMENT_TABS.map((tab, index) => (
           <button
             key={tab}
+            id={`environment-tab-${tab}`}
             type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            aria-controls={`environment-panel-${tab}`}
+            tabIndex={activeTab === tab ? 0 : -1}
             onClick={() => onTabChange(tab)}
+            onKeyDown={(event) =>
+              handleTabListKeyDown(
+                event,
+                index,
+                ENVIRONMENT_TABS,
+                onTabChange,
+                "environment-tab",
+              )
+            }
             className={cn(
               "rounded-lg py-2 text-sm transition-colors",
               activeTab === tab
@@ -42,8 +67,8 @@ function EnvironmentTabToggle({
             )}
           >
             {tab === "existing"
-              ? "Choose existing environment"
-              : "Add new environment"}
+              ? t("deployments.chooseExistingEnvironment")
+              : t("deployments.addNewEnvironment")}
           </button>
         ))}
       </div>
@@ -60,14 +85,15 @@ function EnvironmentList({
   selectedEnvironment: ProviderAccount | null;
   onSelectEnvironment: (environment: ProviderAccount) => void;
 }) {
+  const { t } = useTranslation();
   return (
     <div className="flex flex-col gap-3">
       <span className="text-sm text-muted-foreground">
-        Select from your existing environments
+        {t("deployments.selectFromExistingEnvironments")}
       </span>
       <div
         role="radiogroup"
-        aria-label="Existing environments"
+        aria-label={t("deployments.ariaExistingEnvironments")}
         className="flex flex-col gap-3"
       >
         {environments.map((environment) => {
@@ -100,6 +126,7 @@ function EnvironmentList({
 }
 
 export default function StepProvider() {
+  const { t } = useTranslation();
   const {
     setSelectedProvider,
     selectedInstance,
@@ -127,7 +154,7 @@ export default function StepProvider() {
 
   return (
     <div className="flex h-full w-full flex-col gap-6 overflow-y-auto py-3">
-      <h2 className="text-lg font-semibold">Provider</h2>
+      <h2 className="text-lg font-semibold">{t("deployments.provider")}</h2>
 
       <div className="flex flex-col gap-3">
         <div className="flex items-center gap-3 rounded-lg border border-border bg-muted p-3">
@@ -141,23 +168,29 @@ export default function StepProvider() {
           </Badge>
         </div>
         <p className="text-sm text-muted-foreground">
-          Configure your watsonx Orchestrate credentials below. New to wxO?{" "}
+          {t("deployments.wxoConfigureCredentials")}{" "}
           <a
-            href="https://www.ibm.com/products/watsonx-orchestrate#pricing"
+            href={decorateWxoUrl(
+              "https://www.ibm.com/products/watsonx-orchestrate#pricing",
+              "signup-pricing",
+            )}
             target="_blank"
             rel="noopener noreferrer"
             className="font-medium text-primary hover:underline"
           >
-            Sign up for watsonx Orchestrate
+            {t("deployments.wxoSignUp")}
           </a>
-          . Already have an account?{" "}
+          . {t("deployments.wxoAlreadyHaveAccount")}{" "}
           <a
-            href="https://www.ibm.com/docs/en/watsonx/watson-orchestrate/base?topic=api-getting-started"
+            href={decorateWxoUrl(
+              "https://www.ibm.com/docs/en/watsonx/watson-orchestrate/base?topic=api-getting-started",
+              "docs-credentials",
+            )}
             target="_blank"
             rel="noopener noreferrer"
             className="font-medium text-primary hover:underline"
           >
-            Find your credentials
+            {t("deployments.wxoFindCredentials")}
           </a>
           .
         </p>
@@ -169,19 +202,30 @@ export default function StepProvider() {
             activeTab={environmentTab}
             onTabChange={setEnvironmentTab}
           />
-          {environmentTab === "existing" ? (
+          <div
+            id="environment-panel-existing"
+            role="tabpanel"
+            aria-labelledby="environment-tab-existing"
+            hidden={environmentTab !== "existing"}
+          >
             <EnvironmentList
               environments={environments}
               selectedEnvironment={selectedInstance}
               onSelectEnvironment={setSelectedInstance}
             />
-          ) : (
+          </div>
+          <div
+            id="environment-panel-new"
+            role="tabpanel"
+            aria-labelledby="environment-tab-new"
+            hidden={environmentTab !== "new"}
+          >
             <ProviderCredentialsForm
               credentials={credentials}
               onCredentialsChange={setCredentials}
               layout="two-column"
             />
-          )}
+          </div>
         </div>
       ) : (
         <ProviderCredentialsForm

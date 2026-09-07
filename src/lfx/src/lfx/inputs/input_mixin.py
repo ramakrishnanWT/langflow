@@ -24,6 +24,8 @@ class FieldTypes(str, Enum):
     DICT = "dict"
     NESTED_DICT = "NestedDict"
     SORTABLE_LIST = "sortableList"
+    ACTION_PICKER = "actionPicker"
+    DURATION = "duration"
     CONNECTION = "connect"
     AUTH = "auth"
     FILE = "file"
@@ -39,6 +41,10 @@ class FieldTypes(str, Enum):
     TOOLS = "tools"
     MCP = "mcp"
     MODEL = "model"
+    DATA_DISPLAY = "data_display"
+    # Wire value stays "knowledge_backend" for backward compatibility with
+    # serialized flows that predate the UI rename to "DB Provider".
+    DB_PROVIDER = "knowledge_backend"
 
 
 SerializableFieldTypes = Annotated[FieldTypes, PlainSerializer(lambda v: v.value, return_type=str)]
@@ -86,6 +92,9 @@ class BaseInputMixin(CrossModuleModel, validate_assignment=True):  # type: ignor
 
     advanced: bool = False
     """Specifies if the field will an advanced parameter (hidden). Defaults to False."""
+
+    api_editable: bool = False
+    """Specifies if the field is exposed as an editable API input. Defaults to False."""
 
     input_types: list[str] | None = None
     """List of input types for the handle when the field has more than one type. Default is an empty list."""
@@ -159,6 +168,20 @@ class ModelInputMixin(BaseModel):
     """Limit for the number of options to display."""
     external_options: dict[str, Any] | None = None
     """Dictionary of external options to display below the dropdown options (e.g., 'Connect other models')."""
+    filters: dict[str, Any] | None = None
+    """Optional metadata constraints applied to the model picker.
+
+    Keys are model-metadata names (any field on ``ModelMetadata`` — e.g.
+    ``tool_calling``, ``reasoning``, ``vision``) and the values are matched
+    via ``==`` against each model's metadata. Models that don't satisfy
+    every constraint are hidden from the dropdown AND from the
+    sticky-default re-injection path, so a previously-saved selection that
+    no longer satisfies the constraints is replaced with a compatible
+    default instead of silently re-appearing.
+
+    Used by the Agent component (``filters={"tool_calling": True}``) to
+    keep models that can't actually run with tools out of the picker.
+    """
 
     @field_validator("model_options", mode="before")
     @classmethod

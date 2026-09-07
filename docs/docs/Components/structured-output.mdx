@@ -14,6 +14,11 @@ For example, you can extract specific details from documents, like email message
 
 ## Use the Structured Output component in a flow
 
+:::tip
+If you're building an agentic flow, the **Agent** component includes a built-in **Structured Response** output that produces structured `Data` without a separate **Structured Output** component.
+For more information, see [Agent component output](/agents#agent-component-output).
+:::
+
 To use the **Structured Output** component in a flow, do the following:
 
 1. Provide an **Input Message**, which is the source material from which you want to extract structured data.
@@ -38,7 +43,7 @@ This can come from practically any component, but it is typically a **Chat Input
     The LLM uses the **Input Message** and **Format Instructions** from the **Structured Output** component to extract specific pieces of data from the input text.
     The output schema is applied to the model's response to produce the final `JSON` or `Table` structured object.
 
-4. Optional: Typically, the structured output is passed to downstream components that use the extracted data for other processes, such as the **Parser** or **JSON Operations** components.
+4. Optional: Typically, the structured output is passed to downstream components that use the extracted data for other processes, such as the **Parser** or **Data Operations** components.
 
 ![A basic flow with Structured Output, Language Model, Type Convert, and Chat Input and Output components.](/img/component-structured-output.png)
 
@@ -116,5 +121,5 @@ Supported types are `str` (default), `int`, `float`, `bool`, and `dict`.
 
 For simple schemas, you might only extract a few `string` or `int` fields.
 For more complex schemas with lists and dictionaries, it might help to refer to the `JSON` and `Table` structures and attributes, as described in [Langflow data types](/data-types).
-You can also emit a rough `JSON` or `Table`, and then use downstream components for further refinement, such as a **JSON Operations** component.
+You can also emit a rough `JSON` or `Table`, and then use downstream components for further refinement, such as a **Data Operations** component.
 

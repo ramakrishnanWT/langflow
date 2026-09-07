@@ -1,9 +1,5 @@
-import React, {
-  type Dispatch,
-  ReactNode,
-  type SetStateAction,
-  useState,
-} from "react";
+import { type Dispatch, ReactNode, type SetStateAction, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { useHref } from "react-router-dom";
 import IconComponent from "@/components/common/genericIconComponent";
 import ShadTooltipComponent from "@/components/common/shadTooltipComponent";
@@ -15,7 +11,9 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Switch } from "@/components/ui/switch";
+import { usePermissions } from "@/contexts/permissionsContext";
 import { usePatchUpdateFlow } from "@/controllers/API/queries/flows/use-patch-update-flow";
+import CustomFlowShareAction from "@/customization/components/custom-flow-share-action";
 import { CustomLink } from "@/customization/components/custom-link";
 import { ENABLE_PUBLISH, ENABLE_WIDGET } from "@/customization/feature-flags";
 import { customMcpOpen } from "@/customization/utils/custom-mcp-open";
@@ -54,43 +52,55 @@ export default function PublishDropdown({
   const isPublished = currentFlow?.access_type === "PUBLIC";
   const hasIO = useFlowStore((state) => state.hasIO);
   const isAuth = useAuthStore((state) => !!state.autoLogin);
+  const { can } = usePermissions();
+  // Publishing changes the flow's access settings → gate on write. Only the
+  // publish controls are gated; the rest of the menu (API access, export,
+  // MCP, embed) stays available to read-only users.
+  const canShare = can(flowId, "write");
   const [openExportModal, setOpenExportModal] = useState(false);
+  const { t } = useTranslation();
 
   const handlePublishedSwitch = async (checked: boolean) => {
-    mutateAsync(
-      {
-        id: flowId ?? "",
-        access_type: checked ? "PRIVATE" : "PUBLIC",
-      },
-      {
-        onSuccess: (updatedFlow) => {
-          if (flows) {
-            setFlows(
-              flows.map((flow) => {
-                if (flow.id === updatedFlow.id) {
-                  return updatedFlow;
-                }
-                return flow;
-              }),
-            );
-            setCurrentFlow(updatedFlow);
-          } else {
+    try {
+      await mutateAsync(
+        {
+          id: flowId ?? "",
+          access_type: checked ? "PRIVATE" : "PUBLIC",
+        },
+        {
+          onSuccess: (updatedFlow) => {
+            if (flows) {
+              setFlows(
+                flows.map((flow) => {
+                  if (flow.id === updatedFlow.id) {
+                    return updatedFlow;
+                  }
+                  return flow;
+                }),
+              );
+              setCurrentFlow(updatedFlow);
+            } else {
+              setErrorData({
+                title: t("errors.failedToSaveFlow"),
+                list: [t("errors.flowsVariableUndefined")],
+              });
+            }
+          },
+          // biome-ignore lint/suspicious/noExplicitAny: legacy
+          onError: (e: any) => {
+            const detail =
+              e.response?.data?.detail || e.message || "Unknown error";
             setErrorData({
-              title: "Failed to save flow",
-              list: ["Flows variable undefined"],
+              title: t("errors.failedToSaveFlow"),
+              list: [detail],
             });
-          }
+          },
         },
-        onError: (e: any) => {
-          const detail =
-            e.response?.data?.detail || e.message || "Unknown error";
-          setErrorData({
-            title: "Failed to save flow",
-            list: [detail],
-          });
-        },
-      },
-    );
+      );
+    } catch {
+      // mutateAsync rejects after invoking onError; the alert above is the
+      // user-facing failure path, so consume the handled rejection here.
+    }
   };
 
   return (
@@ -103,7 +113,7 @@ export default function PublishDropdown({
             className="!px-2.5 font-normal"
             data-testid="publish-button"
           >
-            Share
+            {t("misc.share")}
             <IconComponent name="ChevronDown" className="!h-5 !w-5" />
           </Button>
         </DropdownMenuTrigger>
@@ -114,20 +124,29 @@ export default function PublishDropdown({
           align="end"
           className="w-full min-w-[275px]"
         >
+          {/* Customization seam: overlays render a user/team share item; the OSS stub renders nothing. */}
+          {flowId && (
+            <CustomFlowShareAction
+              resourceId={flowId}
+              resourceType="flow"
+              resourceName={flowName}
+              menuContext="editor"
+            />
+          )}
           <DropdownMenuItem
             className="deploy-dropdown-item group"
             onClick={() => setOpenApiModal(true)}
             data-testid="api-access-item"
           >
             <IconComponent name="Code2" className={`icon-size mr-2`} />
-            <span>API access</span>
+            <span>{t("misc.apiAccess")}</span>
           </DropdownMenuItem>
           <DropdownMenuItem
             className="deploy-dropdown-item group"
             onClick={() => setOpenExportModal(true)}
           >
             <IconComponent name="Download" className={`icon-size mr-2`} />
-            <span>Export</span>
+            <span>{t("misc.export")}</span>
           </DropdownMenuItem>
           <CustomLink
             className={cn("flex-1")}
@@ -140,7 +159,7 @@ export default function PublishDropdown({
               data-testid="mcp-server-item"
             >
               <IconComponent name="Mcp" className={`icon-size mr-2`} />
-              <span>MCP Server</span>
+              <span>{t("misc.mcpServer")}</span>
               <IconComponent
                 name="ExternalLink"
                 className={`icon-size ml-auto hidden group-hover:block`}
@@ -153,14 +172,14 @@ export default function PublishDropdown({
               className="deploy-dropdown-item group"
             >
               <IconComponent name="Columns2" className={`icon-size mr-2`} />
-              <span>Embed into site</span>
+              <span>{t("misc.embedIntoSite")}</span>
             </DropdownMenuItem>
           )}
 
           {ENABLE_PUBLISH && (
             <DropdownMenuItem
               className="deploy-dropdown-item group"
-              disabled={!hasIO}
+              disabled={!canShare || !hasIO}
               onClick={() => {}}
               data-testid="shareable-playground"
             >
@@ -173,8 +192,8 @@ export default function PublishDropdown({
                       hasIO
                         ? isPublished
                           ? encodeURI(`${domain}/playground/${flowId}`)
-                          : "Activate to share a public version of this Playground"
-                        : "Add a Chat Input or Chat Output to access your flow"
+                          : t("misc.activateToShare")
+                        : t("misc.addChatInputOutput")
                     }
                   >
                     <div className="flex items-center">
@@ -192,11 +211,11 @@ export default function PublishDropdown({
                           to={`/playground/${flowId}`}
                           target="_blank"
                         >
-                          <span>Shareable Playground</span>
+                          <span>{t("misc.shareablePlayground")}</span>
                         </CustomLink>
                       ) : (
                         <span className={cn(!isPublished && "opacity-50")}>
-                          Shareable Playground
+                          {t("misc.shareablePlayground")}
                         </span>
                       )}
                     </div>
@@ -206,11 +225,11 @@ export default function PublishDropdown({
                   data-testid="publish-switch"
                   className="scale-[85%]"
                   checked={isPublished}
-                  disabled={!hasIO}
+                  disabled={!canShare || !hasIO}
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    handlePublishedSwitch(isPublished);
+                    void handlePublishedSwitch(isPublished);
                   }}
                 />
               </div>

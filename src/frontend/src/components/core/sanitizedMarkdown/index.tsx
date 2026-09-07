@@ -1,5 +1,4 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useTranslation } from "react-i18next";
 import Markdown from "react-markdown";
 import rehypeMathjax from "rehype-mathjax/browser";
 import rehypeRaw from "rehype-raw";
@@ -27,7 +26,6 @@ export const SanitizedMarkdown = ({
   emptyMessage,
   className,
 }: SanitizedMarkdownProps) => {
-  const { t } = useTranslation();
   const markdownRef = useRef<HTMLDivElement>(null);
   const [showWarning, setShowWarning] = useState(false);
 
@@ -59,7 +57,7 @@ export const SanitizedMarkdown = ({
   return (
     <div ref={markdownRef} className={className}>
       {showWarning && (
-        <div className="text-muted-foreground text-sm p-2 border border-yellow-500 bg-yellow-50 dark:bg-yellow-900/20 rounded mb-2">
+        <div className="text-muted-foreground text-sm p-2 border border-warning bg-warning/30 rounded mb-2">
           ⚠️ The response was filtered by security sanitization and cannot be
           displayed.
         </div>
@@ -77,6 +75,14 @@ export const SanitizedMarkdown = ({
             isEmpty ? "text-muted-foreground" : "text-primary",
           )}
           components={{
+            // Spread first, then pin target/rel, so a raw-HTML anchor that
+            // arrives with its own target/rel cannot opt out of noopener.
+            // Matches the link handling every other Markdown site here uses.
+            a: ({ node, ...props }) => (
+              <a {...props} target="_blank" rel="noopener noreferrer">
+                {props.children}
+              </a>
+            ),
             p({ node, ...props }) {
               return (
                 <p className="w-fit max-w-full my-1.5 last:mb-0 first:mt-0">
@@ -103,14 +109,15 @@ export const SanitizedMarkdown = ({
             },
             table: ({ node, ...props }) => {
               return (
-                <div className="max-w-full overflow-hidden rounded-md border bg-muted">
+                <div className="max-w-full overflow-hidden rounded-xl border border-border/70 bg-primary-foreground shadow-sm">
                   <div className="max-h-[600px] w-full overflow-auto p-4">
                     <table className="!my-0 w-full">{props.children}</table>
                   </div>
                 </div>
               );
             },
-            code: ({ node, inline, className, children, ...props }: any) => {
+            // biome-ignore lint/suspicious/noExplicitAny: pre-existing react-markdown override; proper type cleanup out of scope for this PR
+            code: ({ node, className, children, ...props }: any) => {
               let content = children as string;
               if (
                 Array.isArray(children) &&
@@ -131,9 +138,18 @@ export const SanitizedMarkdown = ({
                   }
                 }
 
+                // react-markdown v8+ removed the `inline` prop. Detect a
+                // fenced code block by the presence of either a
+                // `language-X` className (hinted block) or multi-line
+                // content (unhinted block). Anything else is inline
+                // backtick code — rendering it as a `<div>`/`<pre>`
+                // CodeTabsComponent inside a markdown `<p>` triggers the
+                // 'div cannot be a descendant of p' hydration error.
                 const match = /language-(\w+)/.exec(className || "");
+                const isBlock =
+                  match !== null || (content?.includes("\n") ?? false);
 
-                return !inline ? (
+                return isBlock ? (
                   <CodeTabsComponent
                     language={(match && match[1]) || ""}
                     code={String(content).replace(/\n$/, "")}

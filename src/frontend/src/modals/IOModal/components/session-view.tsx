@@ -1,7 +1,13 @@
 import { useIsFetching } from "@tanstack/react-query";
-import type { NewValueParams, SelectionChangedEvent } from "ag-grid-community";
+import type {
+  CellKeyDownEvent,
+  NewValueParams,
+  SelectionChangedEvent,
+  SuppressKeyboardEventParams,
+} from "ag-grid-community";
 import cloneDeep from "lodash/cloneDeep";
 import { useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { removeMessages } from "@/components/core/playgroundComponent/chat-view/utils/message-utils";
 import Loading from "@/components/ui/loading";
 import {
@@ -15,6 +21,14 @@ import useAlertStore from "../../../stores/alertStore";
 import { useMessagesStore } from "../../../stores/messagesStore";
 import { extractColumnsFromRows, messagesSorter } from "../../../utils/utils";
 
+function suppressMessageRowActionKeys(params: SuppressKeyboardEventParams) {
+  return (
+    params.event.key === "Enter" ||
+    params.event.key === " " ||
+    params.event.key === "Spacebar"
+  );
+}
+
 export default function SessionView({
   session,
   id,
@@ -22,6 +36,7 @@ export default function SessionView({
   session?: string;
   id?: string;
 }) {
+  const { t } = useTranslation();
   const messages = useMessagesStore((state) => state.messages);
   const setMessages = useMessagesStore((state) => state.setMessages);
   const setErrorData = useAlertStore((state) => state.setErrorData);
@@ -62,7 +77,27 @@ export default function SessionView({
     }
   }, [queryData, setMessages]);
 
-  const columns = extractColumnsFromRows(messages, "intersection");
+  const columnHeaderMap: Record<string, string> = {
+    timestamp: t("messages.column.timestamp"),
+    text: t("messages.column.text"),
+    sender: t("messages.column.sender"),
+    sender_name: t("messages.column.senderName"),
+    session_id: t("messages.column.sessionId"),
+    files: t("messages.column.files"),
+  };
+
+  const columns = extractColumnsFromRows(messages, "intersection").map(
+    (col) => ({
+      ...col,
+      ...(col.field && columnHeaderMap[col.field]
+        ? { headerName: columnHeaderMap[col.field] }
+        : {}),
+      ...(col.field === "text"
+        ? { flex: 3, minWidth: 320, tooltipField: "text" }
+        : {}),
+      suppressKeyboardEvent: suppressMessageRowActionKeys,
+    }),
+  );
   const isFetchingCount = useIsFetching({
     queryKey: ["useGetMessagesQuery"],
     exact: false,
@@ -77,12 +112,12 @@ export default function SessionView({
       }
       setSelectedRows([]);
       setSuccessData({
-        title: "Messages deleted successfully.",
+        title: t("success.messagesDeleted"),
       });
     },
     onError: () => {
       setErrorData({
-        title: "Error deleting messages.",
+        title: t("errors.deletingMessages"),
       });
     },
   });
@@ -106,12 +141,12 @@ export default function SessionView({
           updateMessage(data);
           // Set success message
           setSuccessData({
-            title: "Messages updated successfully.",
+            title: t("success.messagesUpdated"),
           });
         },
         onError: () => {
           setErrorData({
-            title: "Error updating messages.",
+            title: t("errors.updatingMessages"),
           });
           event.data[field] = event.oldValue;
           event.api.refreshCells();
@@ -134,6 +169,18 @@ export default function SessionView({
     deleteMessages({ ids: selectedRows });
   }
 
+  function handleCellKeyDown(event: CellKeyDownEvent) {
+    const keyboardEvent = event.event as KeyboardEvent | undefined;
+    if (keyboardEvent?.key !== " " && keyboardEvent?.key !== "Spacebar") {
+      return;
+    }
+
+    keyboardEvent.preventDefault();
+    keyboardEvent.stopPropagation();
+    event.node.setSelected(!event.node.isSelected(), false);
+    setSelectedRows(event.api.getSelectedRows().map((row) => row.id));
+  }
+
   const editable = useMemo(() => {
     return playgroundPage
       ? false
@@ -141,19 +188,25 @@ export default function SessionView({
   }, [handleUpdateMessage]);
 
   return isFetching ? (
-    <div className="flex h-full w-full items-center justify-center align-middle">
+    <div
+      aria-label={t("common.loading")}
+      className="flex h-full w-full items-center justify-center align-middle"
+      role="status"
+    >
       <Loading></Loading>
     </div>
   ) : (
     <TableComponent
       key={"sessionView"}
+      tableLabel={t("messages.title")}
       onDelete={playgroundPage ? undefined : handleRemoveMessages}
       readOnlyEdit
       editable={editable}
-      overlayNoRowsTemplate="No data available"
+      overlayNoRowsTemplate={t("table.noRowsToShow")}
       onSelectionChanged={(event: SelectionChangedEvent) => {
         setSelectedRows(event.api.getSelectedRows().map((row) => row.id));
       }}
+      onCellKeyDown={handleCellKeyDown}
       rowSelection={playgroundPage ? undefined : "multiple"}
       suppressRowClickSelection={true}
       pagination={true}

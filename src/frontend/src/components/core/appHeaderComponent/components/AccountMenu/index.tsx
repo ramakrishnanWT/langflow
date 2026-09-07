@@ -1,5 +1,5 @@
-import { FaDiscord, FaGithub } from "react-icons/fa";
 import { useTranslation } from "react-i18next";
+import { FaDiscord, FaGithub } from "react-icons/fa";
 import { ForwardedIconComponent } from "@/components/common/genericIconComponent";
 import {
   DATASTAX_DOCS_URL,
@@ -9,11 +9,14 @@ import {
   TWITTER_URL,
 } from "@/constants/constants";
 import { useLogout } from "@/controllers/API/queries/auth";
+import { CustomAdminPageMenuItem } from "@/customization/components/custom-admin-page-menu-item";
+import { CustomHeaderMenuItemsTitle } from "@/customization/components/custom-header-menu-items-title";
 import { CustomProfileIcon } from "@/customization/components/custom-profile-icon";
 import { ENABLE_DATASTAX_LANGFLOW } from "@/customization/feature-flags";
 import { useCustomNavigate } from "@/customization/hooks/use-custom-navigate";
 import useAuthStore from "@/stores/authStore";
 import { useDarkStore } from "@/stores/darkStore";
+import { useUtilityStore } from "@/stores/utilityStore";
 import { cn, stripReleaseStageFromVersion } from "@/utils/utils";
 import {
   HeaderMenu,
@@ -30,11 +33,8 @@ export const AccountMenu = () => {
   const latestVersion = useDarkStore((state) => state.latestVersion);
   const navigate = useCustomNavigate();
   const { mutate: mutationLogout } = useLogout();
-
-  const { isAdmin, autoLogin } = useAuthStore((state) => ({
-    isAdmin: state.isAdmin,
-    autoLogin: state.autoLogin,
-  }));
+  const hideLogoutButton = useUtilityStore((state) => state.hideLogoutButton);
+  const autoLogin = useAuthStore((state) => state.autoLogin);
 
   const handleLogout = () => {
     mutationLogout();
@@ -61,6 +61,7 @@ export const AccountMenu = () => {
       </HeaderMenuToggle>
       <HeaderMenuItems position="right" classNameSize="w-[272px]">
         <div className="divide-y divide-foreground/10">
+          <CustomHeaderMenuItemsTitle />
           <div>
             <div className="h-[44px] items-center px-4 pt-3">
               <div className="flex items-center justify-between">
@@ -101,22 +102,7 @@ export const AccountMenu = () => {
               </span>
             </HeaderMenuItemButton>
 
-            {isAdmin && !autoLogin && (
-              <div>
-                <HeaderMenuItemButton
-                  onClick={() => {
-                    navigate("/admin");
-                  }}
-                >
-                  <span
-                    data-testid="menu_admin_page_button"
-                    id="menu_admin_page_button"
-                  >
-                    {t("account.adminPage")}
-                  </span>
-                </HeaderMenuItemButton>
-              </div>
-            )}
+            <CustomAdminPageMenuItem onNavigate={(path) => navigate(path)} />
             <HeaderMenuItemLink
               newPage
               href={ENABLE_DATASTAX_LANGFLOW ? DATASTAX_DOCS_URL : DOCS_URL}
@@ -134,7 +120,7 @@ export const AccountMenu = () => {
                 id="menu_github_button"
                 className="flex items-center gap-2"
               >
-                <FaGithub className="h-4 w-4" />
+                <FaGithub className="h-4 w-4" aria-hidden="true" />
                 {t("account.github")}
               </span>
             </HeaderMenuItemLink>
@@ -144,7 +130,10 @@ export const AccountMenu = () => {
                 id="menu_discord_button"
                 className="flex items-center gap-2"
               >
-                <FaDiscord className="h-4 w-4 text-[#5865F2]" />
+                <FaDiscord
+                  className="h-4 w-4 text-[#5865F2]"
+                  aria-hidden="true"
+                />
                 {t("account.discord")}
               </span>
             </HeaderMenuItemLink>
@@ -171,7 +160,7 @@ export const AccountMenu = () => {
             </div>
           </div>
 
-          {!autoLogin && (
+          {!autoLogin && !hideLogoutButton && (
             <div>
               <HeaderMenuItemButton onClick={handleLogout} icon="log-out">
                 {t("account.logout")}

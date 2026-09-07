@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "react-i18next";
 import JsonOutputViewComponent from "@/components/core/jsonOutputComponent/json-output-view";
 import { MAX_TEXT_LENGTH } from "@/constants/constants";
 import type { LogsLogType, OutputLogType } from "@/types/api";
@@ -12,13 +13,14 @@ import {
 import { Case } from "../../../../../../shared/components/caseComponent";
 import TextOutputView from "../../../../../../shared/components/textOutputView";
 import useFlowStore from "../../../../../../stores/flowStore";
+import type { OutputModalTab } from "../../index";
 import ErrorOutput from "./components";
 
 // Define the props type
 interface SwitchOutputViewProps {
   nodeId: string;
   outputName: string;
-  type: "Outputs" | "Logs";
+  type: OutputModalTab;
 }
 
 const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
@@ -26,6 +28,7 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
   outputName,
   type,
 }) => {
+  const { t } = useTranslation();
   const flowPool = useFlowStore((state) => state.flowPool);
   const nodes = useFlowStore((state) => state.nodes);
 
@@ -46,7 +49,7 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
       (outputConfig.types && outputConfig.types.includes("Tool")));
 
   const results: OutputLogType | LogsLogType[] =
-    (type === "Outputs"
+    (type === "outputs"
       ? flowPoolNode?.data?.outputs?.[outputName]
       : flowPoolNode?.data?.logs?.[outputName]) ?? {};
   const resultType = Array.isArray(results) ? undefined : results?.type;
@@ -89,7 +92,7 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
   // Custom component for Tool output display
   const ToolOutputDisplay = ({ tools }) => {
     if (!Array.isArray(tools) || tools.length === 0) {
-      return <div>No tools available</div>;
+      return <div>{t("output.noToolsAvailable")}</div>;
     }
 
     return (
@@ -130,7 +133,7 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
     );
   };
 
-  return type === "Outputs" ? (
+  return type === "outputs" ? (
     <>
       <Case condition={isToolOutput && resultMessageMemoized}>
         <ToolOutputDisplay
@@ -144,7 +147,7 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
       <Case
         condition={(!resultType || resultType === "unknown") && !isToolOutput}
       >
-        <div>NO OUTPUT</div>
+        <div>{t("output.noOutput")}</div>
       </Case>
       <Case
         condition={
@@ -167,10 +170,12 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
         <DataOutputComponent
           rows={
             Array.isArray(resultMessageMemoized)
-              ? (resultMessageMemoized as Array<any>).every(
+              ? // biome-ignore lint/suspicious/noExplicitAny: legacy
+                (resultMessageMemoized as Array<any>).every(
                   (item) => item?.data,
                 )
-                ? (resultMessageMemoized as Array<any>).map(
+                ? // biome-ignore lint/suspicious/noExplicitAny: legacy
+                  (resultMessageMemoized as Array<any>).map(
                     (item) => item?.data,
                   )
                 : resultMessageMemoized
@@ -197,7 +202,7 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
               name="AlertCircle"
               className="h-5 w-5 text-primary"
             />
-            <AlertTitle>{"Streaming is not supported"}</AlertTitle>
+            <AlertTitle>{t("output.streamingNotSupported")}</AlertTitle>
             <AlertDescription>
               {
                 "Use the playground to interact with components that stream data"
@@ -211,8 +216,10 @@ const SwitchOutputView: React.FC<SwitchOutputViewProps> = ({
     <DataOutputComponent
       rows={
         Array.isArray(results)
-          ? (results as Array<any>).every((item) => item?.data)
-            ? (results as Array<any>).map((item) => item?.data)
+          ? // biome-ignore lint/suspicious/noExplicitAny: legacy
+            (results as Array<any>).every((item) => item?.data)
+            ? // biome-ignore lint/suspicious/noExplicitAny: legacy
+              (results as Array<any>).map((item) => item?.data)
             : results
           : Object.keys(results)?.length > 0
             ? [results]

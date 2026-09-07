@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import useFlowStore from "@/stores/flowStore";
 import { cn } from "@/utils/utils";
@@ -7,11 +8,14 @@ export default function NodeLegacyComponent({
   legacy,
   replacement,
   setDismissAll,
+  disabled = false,
 }: {
   legacy?: boolean;
   replacement?: string[];
   setDismissAll: (value: boolean) => void;
+  disabled?: boolean;
 }) {
+  const { t } = useTranslation();
   const setFilterComponent = useFlowStore((state) => state.setFilterComponent);
   const setFilterType = useFlowStore((state) => state.setFilterType);
   const setFilterEdge = useFlowStore((state) => state.setFilterEdge);
@@ -42,8 +46,9 @@ export default function NodeLegacyComponent({
             e.stopPropagation();
             setDismissAll(true);
           }}
-          aria-label="Dismiss warning bar"
+          aria-label={t("node.dismissWarning")}
           data-testid="dismiss-warning-bar"
+          disabled={disabled}
         >
           Dismiss
         </Button>

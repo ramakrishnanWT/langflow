@@ -13,8 +13,15 @@ from fastapi.responses import StreamingResponse
 from lfx.services.settings.service import SettingsService
 from lfx.utils.helpers import build_content_type_from_extension
 
-from langflow.api.utils import CurrentActiveUser, DbSession, ValidatedFileName, ValidatedFolderName
+from langflow.api.utils import (
+    CurrentActiveUser,
+    DbSession,
+    ValidatedFileName,
+    ValidatedFolderName,
+    build_content_disposition,
+)
 from langflow.api.v1.schemas import UploadFileResponse
+from langflow.services.authorization import FlowAction, ensure_flow_permission
 from langflow.services.database.models.flow.model import Flow
 from langflow.services.deps import get_settings_service, get_storage_service
 from langflow.services.storage.service import StorageService
@@ -78,9 +85,20 @@ async def upload_file(
     *,
     file: UploadFile,
     flow: Annotated[Flow, Depends(get_flow)],
+    current_user: CurrentActiveUser,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
     settings_service: Annotated[SettingsService, Depends(get_settings_service)],
 ) -> UploadFileResponse:
+    # Writing a file to a flow's storage is a flow mutation: enforce WRITE so
+    # the external access ceiling (e.g. a "viewer") cannot upload via this route.
+    await ensure_flow_permission(
+        current_user,
+        FlowAction.WRITE,
+        flow_id=flow.id,
+        flow_user_id=flow.user_id,
+        workspace_id=flow.workspace_id,
+        folder_id=flow.folder_id,
+    )
     try:
         max_file_size_upload = settings_service.settings.max_file_size_upload
     except Exception as e:
@@ -127,7 +145,7 @@ async def download_file(
     try:
         file_content = await storage_service.get_file(flow_id=flow_id_str, file_name=file_name)
         headers = {
-            "Content-Disposition": f"attachment; filename={file_name} filename*=UTF-8''{file_name}",
+            "Content-Disposition": build_content_disposition(file_name),
             "Content-Type": "application/octet-stream",
             "Content-Length": str(len(file_content)),
         }
@@ -161,7 +179,15 @@ async def download_image(
 
     try:
         file_content = await storage_service.get_file(flow_id=flow_id_str, file_name=file_name)
-        return StreamingResponse(BytesIO(file_content), media_type=content_type)
+        # Defense-in-depth: a tenant-uploaded SVG/HTML served inline with a renderable content type
+        # would execute scripts in the app origin if opened directly. nosniff stops MIME sniffing
+        # and Content-Disposition: attachment forces a download on direct navigation (so any script
+        # cannot run in-origin). <img>/blob embedding -- the intended use -- is unaffected.
+        return StreamingResponse(
+            BytesIO(file_content),
+            media_type=content_type,
+            headers={"X-Content-Type-Options": "nosniff", "Content-Disposition": "attachment"},
+        )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -190,31 +216,28 @@ async def download_profile_picture(
 
         extension = safe_file.split(".")[-1]
         config_dir = settings_service.settings.config_dir
-        config_path = Path(config_dir).resolve()  # type: ignore[arg-type]
 
-        # Construct the file path
-        file_path = (config_path / "profile_pictures" / safe_folder / safe_file).resolve()
-
-        # SECURITY: Verify the resolved path is still within the allowed directory
-        # This prevents path traversal even if symbolic links are involved.
-        # Uses os.path.normpath + startswith (the pattern recognised by CodeQL as a sanitiser).
-        allowed_base = str((config_path / "profile_pictures").resolve())
-        if not (str(file_path).startswith(allowed_base + os.sep) or str(file_path) == allowed_base):
+        # SECURITY: use os.path.realpath + startswith — the sanitiser pattern
+        # recognised by CodeQL's py/path-injection analysis. realpath canonicalises
+        # the path and resolves symlinks, so the subsequent startswith check is
+        # robust against both traversal sequences and symlink-based escapes.
+        # os.path.join is deliberate here (PTH118) to match CodeQL's sanitiser model.
+        allowed_base = os.path.realpath(os.path.join(str(config_dir), "profile_pictures"))  # noqa: PTH118
+        candidate = os.path.realpath(os.path.join(allowed_base, safe_folder, safe_file))  # noqa: PTH118
+        if candidate != allowed_base and not candidate.startswith(allowed_base + os.sep):
             raise HTTPException(status_code=404, detail="Profile picture not found")
+        file_path = Path(candidate)
 
         # Fallback to package bundled profile pictures if not found in config_dir
         if not file_path.exists():
             from langflow.initial_setup import setup
 
-            package_base = Path(setup.__file__).parent / "profile_pictures"
-            package_path = (package_base / safe_folder / safe_file).resolve()
-
-            # SECURITY: Verify package path is also within allowed directory
-            allowed_package_base = str(package_base.resolve())
-            pkg_path_str = str(package_path)
-            if not (pkg_path_str.startswith(allowed_package_base + os.sep) or pkg_path_str == allowed_package_base):
+            package_base = os.path.realpath(str(Path(setup.__file__).parent / "profile_pictures"))
+            package_candidate = os.path.realpath(os.path.join(package_base, safe_folder, safe_file))  # noqa: PTH118
+            if package_candidate != package_base and not package_candidate.startswith(package_base + os.sep):
                 raise HTTPException(status_code=404, detail="Profile picture not found")
 
+            package_path = Path(package_candidate)
             if package_path.exists():
                 file_path = package_path
             else:
@@ -287,8 +310,19 @@ async def list_files(
 async def delete_file(
     file_name: ValidatedFileName,
     flow: Annotated[Flow, Depends(get_flow)],
+    current_user: CurrentActiveUser,
     storage_service: Annotated[StorageService, Depends(get_storage_service)],
 ):
+    # Deleting a file from a flow's storage mutates the flow's attachments;
+    # enforce WRITE so the external access ceiling (e.g. a "viewer") is honored.
+    await ensure_flow_permission(
+        current_user,
+        FlowAction.WRITE,
+        flow_id=flow.id,
+        flow_user_id=flow.user_id,
+        workspace_id=flow.workspace_id,
+        folder_id=flow.folder_id,
+    )
     try:
         await storage_service.delete_file(flow_id=str(flow.id), file_name=file_name)
     except Exception as e:

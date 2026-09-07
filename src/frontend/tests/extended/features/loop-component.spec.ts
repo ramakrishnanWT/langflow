@@ -1,7 +1,9 @@
 import { expect, test } from "../../fixtures";
 import { addLegacyComponents } from "../../utils/add-legacy-components";
 import { adjustScreenView } from "../../utils/adjust-screen-view";
-import { awaitBootstrapTest } from "../../utils/await-bootstrap-test";
+import { TEXTS } from "../../utils/constants/texts";
+import { addComponentFromSidebar } from "../../utils/flow/add-component-from-sidebar";
+import { openBlankFlow } from "../../utils/flow/open-blank-flow";
 import { uploadFile } from "../../utils/upload-file";
 import { zoomOut } from "../../utils/zoom-out";
 
@@ -9,8 +11,7 @@ test(
   "should process loop with update data correctly",
   { tag: ["@release", "@workspace", "@components"] },
   async ({ page }) => {
-    await awaitBootstrapTest(page);
-    await page.getByTestId("blank-flow").click();
+    await openBlankFlow(page);
 
     await addLegacyComponents(page);
 
@@ -23,7 +24,7 @@ test(
 
     // Add URL component
     await page.getByTestId("sidebar-search-input").click();
-    await page.getByTestId("sidebar-search-input").fill("url");
+    await page.getByTestId("sidebar-search-input").fill(TEXTS.searchUrl);
     await page.waitForSelector('[data-testid="data_sourceURL"]', {
       timeout: 1000,
     });
@@ -53,17 +54,26 @@ test(
     // Add Update Data component
     await page.getByTestId("sidebar-search-input").click();
     await page.getByTestId("sidebar-search-input").fill("data operations");
-    await page.waitForSelector('[data-testid="processingJSON Operations"]', {
+    await page.waitForSelector('[data-testid="processingData Operations"]', {
       timeout: 1000,
     });
 
     await page
-      .getByTestId("processingJSON Operations")
+      .getByTestId("processingData Operations")
       .dragTo(page.locator('//*[@id="react-flow-id"]'), {
         targetPosition: { x: 500, y: 100 },
       });
 
     await adjustScreenView(page, { numberOfZoomOut: 3 });
+
+    // The unified Operations component defaults to the "Text" input type.
+    // Switch it to "JSON" now, while no neighboring node can overlap the
+    // tab, so its JSON input/output handles render for the wiring below.
+    await page.getByTestId("tab_1_json").first().click();
+    await page
+      .getByTestId("handle-operations-shownode-json-left")
+      .first()
+      .waitFor({ state: "visible", timeout: 30000 });
 
     // Add Parse Data component
     await page.getByTestId("sidebar-search-input").click();
@@ -75,7 +85,9 @@ test(
     await page
       .getByTestId("processingParser")
       .dragTo(page.locator('//*[@id="react-flow-id"]'), {
-        targetPosition: { x: 600, y: 200 },
+        // Far from the viewport center so it cannot land on the Data
+        // Operations node that the preceding fit-view just centered.
+        targetPosition: { x: 950, y: 550 },
       });
 
     //This one is for testing the wrong loop message
@@ -91,24 +103,14 @@ test(
         targetPosition: { x: 600, y: 400 },
       });
 
-    const _loopItemInput = await page
-      .getByTestId("handle-loopcomponent-shownode-item-left")
-      .first()
-      .click();
-
-    // Add Chat Output component
-    await page.getByTestId("sidebar-search-input").click();
-    await page.getByTestId("sidebar-search-input").fill("chat output");
-
-    await page.locator(".react-flow__renderer").click();
-
-    await page.waitForTimeout(1000);
-
-    await page
-      .getByTestId("input_outputChat Output")
-      .dragTo(page.locator('//*[@id="react-flow-id"]'), {
-        targetPosition: { x: 200, y: 100 },
-      });
+    // Add Chat Output through the verified sidebar path so the wiring below
+    // cannot race a dropped drag event.
+    await addComponentFromSidebar(page, {
+      search: TEXTS.searchChatOutput,
+      testId: "input_outputChat Output",
+      position: { x: 200, y: 100 },
+    });
+    await expect(page.getByTestId("title-Chat Output")).toBeVisible();
 
     await adjustScreenView(page, { numberOfZoomOut: 3 });
 
@@ -119,7 +121,7 @@ test(
       .first()
       .click();
     await page
-      .getByTestId("handle-dataoperations-shownode-json-left")
+      .getByTestId("handle-operations-shownode-json-left")
       .first()
       .click();
 
@@ -172,7 +174,7 @@ test(
       .getByTestId("inputlist_str_urls_1")
       .fill("https://en.wikipedia.org/wiki/Human_intelligence");
 
-    await page.getByTestId("title-JSON Operations").click();
+    await page.getByTestId("title-Data Operations").click();
 
     await page.waitForTimeout(1000);
 
@@ -194,7 +196,9 @@ test(
     // Build and run, expect the wrong loop message
     await page.getByTestId("button_run_read file").click();
 
-    await page.waitForSelector("text=built successfully", { timeout: 30000 });
+    await page.waitForSelector(`text=${TEXTS.toastBuiltSuccessfully}`, {
+      timeout: 30000,
+    });
 
     // Delete the second parse data used to test
 
@@ -202,12 +206,12 @@ test(
 
     await page.getByTestId("more-options-modal").click();
 
-    await page.getByText("Delete").first().click();
+    await page.getByText(TEXTS.delete, { exact: true }).first().click();
 
     // Update Data -> Loop Item (left side)
 
     await page
-      .getByTestId("handle-dataoperations-shownode-json-right")
+      .getByTestId("handle-operations-shownode-json-right")
       .first()
       .click();
     await page
@@ -228,7 +232,9 @@ test(
     await expect(chatOutputInspectionButton).toBeEnabled({ timeout: 60000 });
     await chatOutputInspectionButton.click();
 
-    const output = await page.getByPlaceholder("Empty").textContent();
+    const output = await page
+      .getByPlaceholder(TEXTS.placeholderEmpty)
+      .textContent();
     expect(output).toContain("modified_value");
 
     // Count occurrences of modified_value in output

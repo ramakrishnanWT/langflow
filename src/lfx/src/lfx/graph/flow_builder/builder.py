@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from lfx.graph.flow_builder.component import add_component, configure_component
+from lfx.graph.flow_builder.component import add_component, configure_component, sync_dropdown_selected_outputs
 from lfx.graph.flow_builder.connect import add_connection
 from lfx.graph.flow_builder.flow import empty_flow
 from lfx.graph.flow_builder.layout import layout_flow
@@ -35,7 +35,7 @@ def load_local_registry() -> dict[str, dict]:
         return _registry_cache
 
     try:
-        with _INDEX_PATH.open() as f:
+        with _INDEX_PATH.open(encoding="utf-8") as f:
             data = json.load(f)
     except FileNotFoundError:
         msg = f"Component registry not found at {_INDEX_PATH}. The lfx package may be installed incorrectly."
@@ -61,13 +61,22 @@ def load_local_registry() -> dict[str, dict]:
     return registry
 
 
-def build_flow_from_spec(spec: str) -> dict[str, Any]:
+def build_flow_from_spec(
+    spec: str,
+    registry: dict[str, dict] | None = None,
+) -> dict[str, Any]:
     """Build a flow dict from a text spec. Returns the flow or errors.
+
+    The ``registry`` argument lets callers (notably the MCP flow-builder
+    tools) inject a user-aware registry overlay — base components plus
+    Components the calling user has registered into their sandbox. When
+    omitted, falls back to the bundled base registry only.
 
     On success: {"flow": <flow_dict>, "name": str, "node_count": int, "edge_count": int}
     On failure: {"error": str, "details": str}
     """
-    registry = load_local_registry()
+    if registry is None:
+        registry = load_local_registry()
 
     try:
         parsed = parse_flow_spec(spec)
@@ -122,10 +131,12 @@ def build_flow_from_spec(spec: str) -> dict[str, Any]:
                 edge["source_output"],
                 id_map[edge["target_id"]],
                 edge["target_input"],
+                registry=registry,
             )
         except (ValueError, KeyError) as e:
             return {"error": f"Failed to connect {src_out} -> {tgt_in}", "details": str(e)}
 
+    sync_dropdown_selected_outputs(flow)
     layout_flow(flow)
 
     flow["name"] = parsed.get("name", "Untitled Flow")

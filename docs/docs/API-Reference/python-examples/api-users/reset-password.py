@@ -11,8 +11,11 @@ who = requests.get(f"{base}/api/v1/users/whoami", headers=headers, timeout=30)
 who.raise_for_status()
 user_id = who.json()["id"]
 
-# Must differ from the current password (default superuser is often langflow/langflow).
-payload = {"password": "DocsExampleResetPass2025!"}
+# Must differ from the current password.
+payload = {
+    "current_password": os.environ.get("LANGFLOW_CURRENT_PASSWORD", "securepassword123"),
+    "password": "DocsExampleResetPass2025!",
+}
 
 response = requests.patch(
     f"{base}/api/v1/users/{user_id}/reset-password",

@@ -1,8 +1,8 @@
+import { useTranslation } from "react-i18next";
 import { usePostValidateCode } from "@/controllers/API/queries/nodes/use-post-validate-code";
 import { usePostValidateComponentCode } from "@/controllers/API/queries/nodes/use-post-validate-component-code";
 import { useUtilityStore } from "@/stores/utilityStore";
 import { clearHandlesFromAdvancedFields } from "@/utils/reactflowUtils";
-import { useTranslation } from "react-i18next";
 import "ace-builds/src-noconflict/ace";
 import "ace-builds/src-noconflict/ext-language_tools";
 import "ace-builds/src-noconflict/ext-searchbox";
@@ -116,7 +116,9 @@ export default function CodeAreaModal({
     validateComponentCode(
       { code, frontend_node: nodeClass! },
       {
-        onSuccess: ({ data, type }) => {
+        onSuccess: (response) => {
+          if (!response) return;
+          const { data, type } = response;
           if (data && type) {
             setValue(code);
             try {
@@ -134,7 +136,7 @@ export default function CodeAreaModal({
 
               clearHandlesFromAdvancedFields(componentId!, merged);
               setNodeClass(merged, type);
-            } catch (e) {
+            } catch {
               clearHandlesFromAdvancedFields(componentId!, data);
               setNodeClass(data, type);
             }
@@ -274,7 +276,7 @@ export default function CodeAreaModal({
                 type="button"
                 data-testid="codeModalOkBtn"
               >
-                Done
+                {t("modal.secretKey.doneButton")}
               </Button>
             ) : (
               <Button
@@ -285,7 +287,7 @@ export default function CodeAreaModal({
                 disabled={isBlocked}
                 data-testid="checkAndSaveBtn"
               >
-                Check & Save
+                {t("modal.prompt.checkAndSave")}
               </Button>
             )}
           </div>
@@ -300,18 +302,18 @@ export default function CodeAreaModal({
           }}
           size="x-small"
           icon="AlertTriangle"
-          confirmationText="Check & Save"
-          cancelText="Discard Changes"
+          confirmationText={t("modal.prompt.checkAndSave")}
+          cancelText={t("modal.discardChanges")}
           open={openConfirmation}
           onCancel={() => setOpen(false)}
           onConfirm={() => {
             processCode();
             setOpenConfirmation(false);
           }}
-          title="Caution"
+          title={t("modal.caution")}
         >
           <ConfirmationModal.Content>
-            <p>Are you sure you want to exit without saving your changes?</p>
+            <p>{t("modal.exitWithoutSaving")}</p>
           </ConfirmationModal.Content>
         </ConfirmationModal>
       </BaseModal.Content>
